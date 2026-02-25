@@ -1,4 +1,7 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
+import { db } from './firebase';
+import { ref, onValue, set } from "firebase/database";
+import './App.css';
 
 // ── Constants ────────────────────────────────────────────────
 const DAYS_HE = ["ראשון","שני","שלישי","רביעי","חמישי","שישי","שבת"];
@@ -6,7 +9,6 @@ const DAYS_SHORT = ["א׳","ב׳","ג׳","ד׳","ה׳","ו׳","ש׳"];
 const MONTHS_HE = ["ינואר","פברואר","מרץ","אפריל","מאי","יוני","יולי","אוגוסט","ספטמבר","אוקטובר","נובמבר","דצמבר"];
 const WORKOUT_TYPES = ["ריצה","אופניים","כוח","טאבטה","זומבה","קל","שחייה"];
 const SEASONS = ["חורף","אביב","קיץ","סתיו"];
-
 const gid = () => Math.random().toString(36).slice(2,9);
 const pad = n => String(n).padStart(2,"0");
 const todayKey = () => { const n=new Date(); return `${n.getFullYear()}-${pad(n.getMonth()+1)}-${pad(n.getDate())}`; };
@@ -20,24 +22,12 @@ const addMins = (timeStr, mins) => { if(!timeStr) return ""; const [h,m]=timeStr
 const timeToMins = t => { if(!t) return 0; const [h,m]=t.split(":").map(Number); return h*60+m; };
 
 // ══════════════════════════════════════════════════════════════
-// 🔄 STORAGE — localStorage (Fixed & Safe)
+// DATA LOGIC (Adapted for Firebase)
 // ══════════════════════════════════════════════════════════════
-const LS = {
-  get: (k, fb) => {
-    try {
-      const v = localStorage.getItem("fos_" + k);
-      return v !== null ? JSON.parse(v) : fb;
-    } catch { return fb; }
-  },
-  set: (k, v) => {
-    try { localStorage.setItem("fos_" + k, JSON.stringify(v)); } catch {}
-  }
-};
-
 const SHOE_SOCK_MAP = {"נעלי ספורט":"גרביים לבנות קצרות","נעלי אלגנט":"גרביים ארוכות","בלנסטון":"גרביים ארוכות"};
 const SHIFTS = [
-  {id:"none",        label:"אין משמרת",            color:"#374151", emoji:"—"},
-  {id:"morning",     label:"בוקר 07:00–15:00",      color:"#F59E0B", emoji:"🌅"},
+  {id:"none",        label:"אין משמרת",             color:"#374151", emoji:"—"},
+  {id:"morning",     label:"בוקר 07:00–15:00",       color:"#F59E0B", emoji:"🌅"},
   {id:"morning_ext", label:"בוקר+ססיה 07:00–19:00", color:"#EF4444", emoji:"🔥"},
 ];
 
@@ -60,7 +50,7 @@ function buildAutoTasks(shiftId, travelMin, kidName) {
   return {today:t, prevDay:[{id:gid(),text:`👕 להכין בגדים ל${kidName} למחר`,done:false,auto:true}]};
 }
 
-// ── Tiny UI ──────────────────────────────────────────────────
+// ── Tiny UI Components ──────────────────────────────────────────────────
 const Chip = ({label,active,color="#7C3AED",onClick,emoji,small}) => (
   <button onClick={onClick} style={{padding:small?"3px 8px":"5px 12px",borderRadius:20,border:`2px solid ${active?color:color+"33"}`,background:active?color:"transparent",color:active?"#fff":color,cursor:"pointer",fontSize:small?11:12,fontWeight:active?700:400,display:"flex",alignItems:"center",gap:4,whiteSpace:"nowrap",transition:"all .15s"}}>
     {emoji&&<span>{emoji}</span>}{label}
@@ -171,7 +161,8 @@ function SmartAlerts({alerts, onDismiss}) {
   );
 }
 
-// ── PANELS ───────────────────────────────────────────────────
+// ── Feature Panels ──────────────────────────────────────────────────────
+// (All logic kept identical to original, just receiving props from main App)
 
 function ShiftPanel({data,onShiftChange,travelMin,onUpdateTravel,kidName,onClose}) {
   const shift=data?.shift||"none";
@@ -325,6 +316,7 @@ const DEFAULT_CATS = {
   hana:  ["חולצות","מכנסיים","שמלות","חצאיות","ג'קטים","נעליים","גרביים","חזיות","אביזרים"],
   uri:   ["חולצות","מכנסיים","גרביים","נעליים","מעיל"],
 };
+
 function OutfitPanel({wardrobeM,wardrobeH,wardrobeU,catsM,catsH,catsU,dataM,dataH,dataU,onM,onH,onU,onWM,onWH,onWU,onCM,onCH,onCU,season,onClose}) {
   const [tab,setTab]=useState("moshe");
   const [wardrobeMode,setWardrobeMode]=useState(false);
@@ -697,15 +689,12 @@ function WinnerPanel({data, onUpdate, who, name, onClose}) {
   const setQ=(qs)=>onUpdate(p=>({...(p||{}),questions:qs}));
   const setChecks=(cb)=>onUpdate(p=>({...(p||{}),checkboxes:cb}));
   const toggleCheck=(id)=>onUpdate(p=>({...(p||{}),[id]:!(p||{})[id]}));
-  
   useEffect(()=>{
     if(d.timerRunning){ timerRef.current=setInterval(()=>onUpdate(p=>({...(p||{}),readTimer:((p||{}).readTimer||0)+1})),1000); }
     else clearInterval(timerRef.current);
     return ()=>clearInterval(timerRef.current);
   },[d.timerRunning]);
-  
   const readTimerMin = Math.floor((d.readTimer||0)/60);
-
   return (
     <Panel title={`🏆 קוד המנצח – ${name}`} color="#F59E0B" onClose={onClose}>
       <div style={{display:"flex",justifyContent:"space-between",marginBottom:14}}>
@@ -884,15 +873,12 @@ function DebtPanel({data, onUpdate, names, onClose}) {
   const paidB = (d.payments||[]).reduce((s,p)=>s+Number(p.amountB||0),0);
   const remaining = Math.max(0,totalDebt-totalPaid);
   const progress = totalDebt>0?Math.min(100,(totalPaid/totalDebt)*100):0;
-  
   const addDebt=()=>{if(!newDebt.name||!newDebt.amount)return;onUpdate({...d,debts:[...(d.debts||[]),{id:gid(),...newDebt,amount:Number(newDebt.amount),active:true}]});setNewDebt({name:"",amount:"",creditor:""});setShowAddDebt(false);};
   const removeDebt=(id)=>onUpdate({...d,debts:(d.debts||[]).filter(x=>x.id!==id)});
   const toggleDebt=(id)=>onUpdate({...d,debts:(d.debts||[]).map(x=>x.id===id?{...x,active:!x.active}:x)});
   const editDebt=(id,patch)=>onUpdate({...d,debts:(d.debts||[]).map(x=>x.id===id?{...x,...patch}:x)});
-  
   const addPayment=()=>{if(!newPay.amountA&&!newPay.amountB)return;onUpdate({...d,payments:[...(d.payments||[]),{id:gid(),...newPay}]});setNewPay({date:todayKey(),amountA:"",amountB:"",note:""});setShowAddPay(false);};
   const removePayment=(id)=>onUpdate({...d,payments:(d.payments||[]).filter(x=>x.id!==id)});
-  
   return (
     <Panel title="💰 ניהול חובות" color="#F59E0B" onClose={onClose}>
       <div style={{background:"linear-gradient(135deg,#F59E0B22,#EF444422)",borderRadius:16,padding:16,marginBottom:16,border:"1px solid #F59E0B33"}}>
@@ -1040,49 +1026,139 @@ function ViewBar({mode, onMode, selDate, onDate}) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// 🏠 MAIN APP — localStorage version
+// 🏠 MAIN APP — Connected to Firebase ☁️
 // ══════════════════════════════════════════════════════════════
 export default function App() {
-  const [history,setHistory]   = useState(() => LS.get("h",{}));
-  const [rec,setRec]           = useState(() => LS.get("r",{}));
-  const [wardrobe,setWardrobe] = useState(() => LS.get("w",{moshe:{},hana:{},uri:{}}));
-  const [wardrobeCats,setWardrobeCats] = useState(() => LS.get("wc",{moshe:null,hana:null,uri:null}));
-  const [mealTpl,setMealTpl]   = useState(() => LS.get("mt",[]));
-  const [usageData,setUsageData] = useState(() => LS.get("u",{}));
-  const [names,setNames]       = useState(() => LS.get("n",{A:"משה",B:"חנה"}));
-  const [travelMin,setTravelMin] = useState(() => LS.get("tm",15));
-  const [season,setSeason]     = useState(() => LS.get("s","חורף"));
-  const [debtData,setDebtData] = useState(() => LS.get("debt",{debts:[],payments:[]}));
-
+  const [history,setHistory]   = useState({});
+  const [rec,setRec]           = useState({});
+  const [wardrobe,setWardrobe] = useState({moshe:{},hana:{},uri:{}});
+  const [wardrobeCats,setWardrobeCats] = useState({moshe:null,hana:null,uri:null});
+  const [mealTpl,setMealTpl]   = useState([]);
+  const [usageData,setUsageData] = useState({});
+  const [names,setNames]       = useState({A:"משה",B:"חנה"});
+  const [travelMin,setTravelMin] = useState(15);
+  const [season,setSeason]     = useState("חורף");
+  const [debtData,setDebtData] = useState({debts:[],payments:[]});
+  
+  const [loading, setLoading] = useState(true);
   const [selDate,setSelDate]   = useState(todayKey());
   const [viewMode,setViewMode] = useState("week");
   const [openPanel,setOpenPanel] = useState(null);
   const [dismissedAlerts,setDismissedAlerts] = useState([]);
-  
   const TODAY = todayKey();
-  
-  // ── Auto-save to localStorage on every change ──
-  useEffect(() => LS.set("h",history),   [history]);
-  useEffect(() => LS.set("r",rec),       [rec]);
-  useEffect(() => LS.set("w",wardrobe),  [wardrobe]);
-  useEffect(() => LS.set("wc",wardrobeCats), [wardrobeCats]);
-  useEffect(() => LS.set("mt",mealTpl),  [mealTpl]);
-  useEffect(() => LS.set("u",usageData), [usageData]);
-  useEffect(() => LS.set("n",names),     [names]);
-  useEffect(() => LS.set("tm",travelMin),[travelMin]);
-  useEffect(() => LS.set("s",season),    [season]);
-  useEffect(() => LS.set("debt",debtData),[debtData]);
 
+  // ── Firebase Sync Logic ────────────────────────
+  useEffect(() => {
+    const rootRef = ref(db, 'family-os-data');
+    const unsubscribe = onValue(rootRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        if (data.history) setHistory(data.history);
+        if (data.rec) setRec(data.rec);
+        if (data.wardrobe) setWardrobe(data.wardrobe);
+        if (data.wardrobeCats) setWardrobeCats(data.wardrobeCats);
+        if (data.mealTpl) setMealTpl(data.mealTpl);
+        if (data.usageData) setUsageData(data.usageData);
+        if (data.names) setNames(data.names);
+        if (data.travelMin) setTravelMin(data.travelMin);
+        if (data.season) setSeason(data.season);
+        if (data.debtData) setDebtData(data.debtData);
+      }
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Generic updater for Firebase
+  const saveToFirebase = (path, value) => {
+    set(ref(db, `family-os-data/${path}`), value);
+  };
+
+  // Wrapper for history updates
+  const setHistoryWrapper = (newHistory) => {
+    // Determine if it's a function or value
+    const val = typeof newHistory === 'function' ? newHistory(history) : newHistory;
+    setHistory(val);
+    saveToFirebase('history', val);
+  };
+  
+  // Wrapper helper to match old "sd" (Set Date) signature
+  const sd = (dk, d) => {
+    const newVal = { ...history, [dk]: d };
+    setHistory(newVal);
+    saveToFirebase(`history/${dk}`, d);
+  };
+  // Wrapper helper to match old "ud" (Update Date) signature
+  const ud = (dk, k, v) => {
+    const cur = history[dk] || {};
+    const newData = { ...cur, [k]: v };
+    const newHistory = { ...history, [dk]: newData };
+    setHistory(newHistory);
+    saveToFirebase(`history/${dk}/${k}`, v);
+  };
+  // Complex updater helper
+  const udFn = (dk, k, updater) => {
+    const cur = history[dk] || {};
+    const prev = cur[k];
+    const next = updater(prev);
+    ud(dk, k, next);
+  };
+
+  // State setters that also sync to Firebase
+  const updateRec = (v) => { 
+    const val = typeof v === 'function' ? v(rec) : v; 
+    setRec(val); 
+    saveToFirebase('rec', val); 
+  };
+  const updateWardrobe = (v) => { 
+    const val = typeof v === 'function' ? v(wardrobe) : v;
+    setWardrobe(val); 
+    saveToFirebase('wardrobe', val);
+  };
+  const updateWardrobeCats = (v) => {
+    const val = typeof v === 'function' ? v(wardrobeCats) : v;
+    setWardrobeCats(val); 
+    saveToFirebase('wardrobeCats', val);
+  };
+  const updateMealTpl = (v) => { setMealTpl(v); saveToFirebase('mealTpl', v); };
+  const updateUsageData = (v) => { setUsageData(v); saveToFirebase('usageData', v); };
+  const updateNames = (v) => { setNames(v); saveToFirebase('names', v); };
+  const updateTravelMin = (v) => { setTravelMin(v); saveToFirebase('travelMin', v); };
+  const updateSeason = (v) => { setSeason(v); saveToFirebase('season', v); };
+  const updateDebtData = (v) => { 
+    const val = typeof v === 'function' ? v(debtData) : v;
+    setDebtData(val); 
+    saveToFirebase('debtData', val); 
+  };
+
+  // ── Logic ───────────────────────────────────────
   const gd=dk=>history[dk]||{};
-  const ud=(dk,k,v)=>setHistory(h=>({...h,[dk]:{...h[dk],[k]:v}}));
-  const sd=(dk,d)=>setHistory(h=>({...h,[dk]:d}));
-  const udFn=(dk,k,updater)=>setHistory(h=>{const cur=h[dk]||{}; const prev=cur[k]; const next=typeof updater==="function"?updater(prev):updater; return {...h,[dk]:{...cur,[k]:next}};});
 
   const handleShift=(shiftId,auto)=>{
     const dk=selDate, dd=gd(dk), prevDay=addDays(dk,-1), prevDd=gd(prevDay);
     const cleaned=(dd.mosheTasks||[]).filter(t=>!t.auto);
-    sd(dk,{...dd,shift:shiftId,mosheTasks:[...cleaned,...auto.today]});
-    if(auto.prevDay.length){const pc=(prevDd.mosheTasks||[]).filter(t=>!t.auto||!t.text.includes("בגדים"));sd(prevDay,{...prevDd,mosheTasks:[...pc,...auto.prevDay]});}
+    
+    // Create updates object for atomic update (optional, but cleaner)
+    const updates = {};
+    updates[`history/${dk}`] = {...dd,shift:shiftId,mosheTasks:[...cleaned,...auto.today]};
+    
+    if(auto.prevDay.length){
+        const pc=(prevDd.mosheTasks||[]).filter(t=>!t.auto||!t.text.includes("בגדים"));
+        updates[`history/${prevDay}`] = {...prevDd,mosheTasks:[...pc,...auto.prevDay]};
+    }
+
+    // Apply locally
+    const newHist = {...history};
+    newHist[dk] = updates[`history/${dk}`];
+    if(auto.prevDay.length) newHist[prevDay] = updates[`history/${prevDay}`];
+    setHistory(newHist);
+
+    // Apply to DB
+    Object.keys(updates).forEach(path => {
+        const key = path.replace('history/', '');
+        set(ref(db, `family-os-data/history/${key}`), updates[path]);
+    });
+
     setOpenPanel(null);
   };
 
@@ -1090,11 +1166,14 @@ export default function App() {
     ud(dk,"workout",v);
     if(v.couple&&v.moshe?.active){
       const prevDay=addDays(dk,-1), prevDd=gd(prevDay), prevTasks=prevDd.mosheTasks||[];
-      if(!prevTasks.find(t=>t.text.includes("לאימון"))){sd(prevDay,{...prevDd,mosheTasks:[...prevTasks,{id:gid(),text:"👟 להכין בגדים לאימון זוגי למחר",done:false,auto:true}]});}
+      if(!prevTasks.find(t=>t.text.includes("לאימון"))){
+          sd(prevDay,{...prevDd,mosheTasks:[...prevTasks,{id:gid(),text:"👟 להכין בגדים לאימון זוגי למחר",done:false,auto:true}]});
+      }
     }
   };
 
   useEffect(()=>{
+    if(loading) return; // Don't run auto-logic until loaded
     const dd=gd(selDate);
     const clients=dd.makeup?.clients||[];
     const lastEnd=clients.reduce((max,c)=>c.endTime&&timeToMins(c.endTime)>max?timeToMins(c.endTime):max,0);
@@ -1103,13 +1182,14 @@ export default function App() {
       const newTask={id:gid(),text:"🏃 לצאת מוקדם מהעבודה ולאסוף את אורי (חנה עסוקה עם לקוחה)",done:false,auto:true,time:""};
       ud(selDate,"mosheTasks",[...(dd.mosheTasks||[]),newTask]);
     }
-  },[selDate,history]);
+  },[selDate,history,loading]);
+
+  if (loading) return <div style={{display:"flex",justifyContent:"center",alignItems:"center",height:"100vh",color:"#7C3AED"}}>טוען נתונים מהענן...</div>;
 
   const dd=gd(selDate);
   const isThursday=dowOf(selDate)===4;
   const shift=SHIFTS.find(s=>s.id===(dd.shift||"none"))||SHIFTS[0];
   const PCOLORS={A:"#7C3AED",B:"#DB2777"};
-
   const buildAlerts=()=>{
     if(selDate!==TODAY) return [];
     const alerts=[];
@@ -1120,7 +1200,6 @@ export default function App() {
     return alerts.filter((_,i)=>!dismissedAlerts.includes(i));
   };
   const alerts=buildAlerts();
-
   const getNextAction=()=>{
     if(selDate!==TODAY) return null;
     const hr=new Date().getHours();
@@ -1134,20 +1213,16 @@ export default function App() {
     return null;
   };
   const nextAction=getNextAction();
-
   const wkDates=weekOf(selDate);
   const cleaningDay=wkDates.find(dk=>gd(dk).cleaning?.scheduled);
   const hideCleaningToday=cleaningDay&&cleaningDay!==selDate;
   const shoppingDay=wkDates.find(dk=>gd(dk).shopping?.scheduled);
   const hideShoppingToday=shoppingDay&&shoppingDay!==selDate;
-
   const makeupClients=dd.makeup?.clients||[];
   const makeupTotal=makeupClients.reduce((s,c)=>{if(c.type==="lashes")return s+90;const base=350,extra=Math.max(0,(c.heads||1)-1)*150,travel=c.atHome?0:150;return s+base+extra+travel;},0);
-
   const totalDebt=(debtData?.debts||[]).filter(x=>x.active!==false).reduce((s,x)=>s+Number(x.amount||0),0);
   const totalPaid=(debtData?.payments||[]).reduce((s,p)=>s+Number(p.amountA||0)+Number(p.amountB||0),0);
   const debtRemaining=Math.max(0,totalDebt-totalPaid);
-
   const CARDS=[
     {id:"shift", emoji:shift.emoji==="—"?"🏥":shift.emoji, title:"משמרת חנה", color:"#3B82F6", subtitle:shift.id==="none"?"לא הוגדרה":shift.label, urgent:shift.id==="morning_ext"},
     {id:"makeup", emoji:"💄", title:"איפור / ריסים", color:"#A855F7", subtitle:makeupClients.length===0?"לא מתוכנן":`${makeupClients.length} לקוחות • ${makeupTotal.toLocaleString()}₪`, done:makeupClients.length>0&&makeupClients.every(c=>c.type==="lashes"||c.depositPaid)},
@@ -1164,19 +1239,19 @@ export default function App() {
     {id:"winner_moshe", emoji:"🏆", title:`קוד המנצח – ${names.A}`, color:"#F59E0B", subtitle:"טקס הלילה שלי"},
     {id:"winner_hana",  emoji:"🌙", title:`קוד המנצח – ${names.B}`, color:"#C084FC", subtitle:"טקס הלילה שלה"},
   ];
-
+  
   const renderPanel=()=>{
     const close=()=>setOpenPanel(null);
     if(!openPanel) return null;
-    if(openPanel==="shift")    return <ShiftPanel data={dd} onShiftChange={handleShift} travelMin={travelMin} onUpdateTravel={setTravelMin} kidName="אורי" onClose={close}/>;
+    if(openPanel==="shift")    return <ShiftPanel data={dd} onShiftChange={handleShift} travelMin={travelMin} onUpdateTravel={updateTravelMin} kidName="אורי" onClose={close}/>;
     if(openPanel==="makeup")   return <MakeupPanel data={dd.makeup} onUpdate={v=>ud(selDate,"makeup",v)} shiftId={dd.shift||"none"} kidName="אורי" onClose={close}/>;
-    if(openPanel==="outfit")   return <OutfitPanel wardrobeM={wardrobe.moshe} wardrobeH={wardrobe.hana} wardrobeU={wardrobe.uri} catsM={wardrobeCats.moshe} catsH={wardrobeCats.hana} catsU={wardrobeCats.uri} dataM={dd.outfitM} dataH={dd.outfitH} dataU={dd.outfitU} onM={v=>ud(selDate,"outfitM",v)} onH={v=>ud(selDate,"outfitH",v)} onU={v=>ud(selDate,"outfitU",v)} onWM={v=>setWardrobe(w=>({...w,moshe:v}))} onWH={v=>setWardrobe(w=>({...w,hana:v}))} onWU={v=>setWardrobe(w=>({...w,uri:v}))} onCM={v=>setWardrobeCats(c=>({...c,moshe:v}))} onCH={v=>setWardrobeCats(c=>({...c,hana:v}))} onCU={v=>setWardrobeCats(c=>({...c,uri:v}))} season={season} onClose={close}/>;
-    if(openPanel==="meals")    return <MealsPanel data={dd.meals} templates={mealTpl} onUpdate={v=>ud(selDate,"meals",v)} onUpdateTpl={setMealTpl} onClose={close}/>;
+    if(openPanel==="outfit")   return <OutfitPanel wardrobeM={wardrobe.moshe} wardrobeH={wardrobe.hana} wardrobeU={wardrobe.uri} catsM={wardrobeCats.moshe} catsH={wardrobeCats.hana} catsU={wardrobeCats.uri} dataM={dd.outfitM} dataH={dd.outfitH} dataU={dd.outfitU} onM={v=>ud(selDate,"outfitM",v)} onH={v=>ud(selDate,"outfitH",v)} onU={v=>ud(selDate,"outfitU",v)} onWM={v=>updateWardrobe(w=>({...w,moshe:v}))} onWH={v=>updateWardrobe(w=>({...w,hana:v}))} onWU={v=>updateWardrobe(w=>({...w,uri:v}))} onCM={v=>updateWardrobeCats(c=>({...c,moshe:v}))} onCH={v=>updateWardrobeCats(c=>({...c,hana:v}))} onCU={v=>updateWardrobeCats(c=>({...c,uri:v}))} season={season} onClose={close}/>;
+    if(openPanel==="meals")    return <MealsPanel data={dd.meals} templates={mealTpl} onUpdate={v=>ud(selDate,"meals",v)} onUpdateTpl={updateMealTpl} onClose={close}/>;
     if(openPanel==="workout")  return <WorkoutPanel data={dd.workout} onUpdate={v=>handleWorkoutUpdate(selDate,v)} wardrobeM={wardrobe.moshe} wardrobeH={wardrobe.hana} onClose={close}/>;
-    if(openPanel==="tasks")    return <TasksPanel mT={dd.mosheTasks||[]} hT={dd.hanaTasks||[]} recM={rec.recM||[]} recH={rec.recH||[]} onMT={v=>ud(selDate,"mosheTasks",v)} onHT={v=>ud(selDate,"hanaTasks",v)} onRM={v=>setRec(r=>({...r,recM:v}))} onRH={v=>setRec(r=>({...r,recH:v}))} names={names} onClose={close}/>;
-    if(openPanel==="cleaning") return <CleaningPanel data={dd.cleaning} allWeekData={history} selectedDate={selDate} onUpdate={v=>ud(selDate,"cleaning",v)} recurring={rec.cleaning} onUpdateRec={v=>setRec(r=>({...r,cleaning:v}))} onClose={close}/>;
-    if(openPanel==="shopping") return <ShoppingPanel data={dd.shopping} onUpdate={v=>ud(selDate,"shopping",v)} recurring={rec.shopping} onUpdateRec={v=>setRec(r=>({...r,shopping:v}))} usageData={usageData} onUpdateUsage={setUsageData} onClose={close}/>;
-    if(openPanel==="debt")     return <DebtPanel data={debtData} onUpdate={setDebtData} names={names} onClose={close}/>;
+    if(openPanel==="tasks")    return <TasksPanel mT={dd.mosheTasks||[]} hT={dd.hanaTasks||[]} recM={rec.recM||[]} recH={rec.recH||[]} onMT={v=>ud(selDate,"mosheTasks",v)} onHT={v=>ud(selDate,"hanaTasks",v)} onRM={v=>updateRec(r=>({...r,recM:v}))} onRH={v=>updateRec(r=>({...r,recH:v}))} names={names} onClose={close}/>;
+    if(openPanel==="cleaning") return <CleaningPanel data={dd.cleaning} allWeekData={history} selectedDate={selDate} onUpdate={v=>ud(selDate,"cleaning",v)} recurring={rec.cleaning} onUpdateRec={v=>updateRec(r=>({...r,cleaning:v}))} onClose={close}/>;
+    if(openPanel==="shopping") return <ShoppingPanel data={dd.shopping} onUpdate={v=>ud(selDate,"shopping",v)} recurring={rec.shopping} onUpdateRec={v=>updateRec(r=>({...r,shopping:v}))} usageData={usageData} onUpdateUsage={updateUsageData} onClose={close}/>;
+    if(openPanel==="debt")     return <DebtPanel data={debtData} onUpdate={updateDebtData} names={names} onClose={close}/>;
     if(openPanel==="zoom")     return <ZoomPanel data={dd.zoom} onUpdate={v=>ud(selDate,"zoom",v)} onClose={close}/>;
     if(openPanel==="dateNight") return <DateNightPanel data={dd.dateNight} onUpdate={v=>ud(selDate,"dateNight",v)} onClose={close}/>;
     if(openPanel==="intimacy") return <IntimacyPanel data={dd.intimacy} onUpdate={v=>ud(selDate,"intimacy",v)} onClose={close}/>;
@@ -1185,7 +1260,6 @@ export default function App() {
   };
 
   const goals=dd.goals||{A:["",""],B:["",""],doneA:[false,false],doneB:[false,false]};
-
   return (
     <div style={{minHeight:"100vh",background:"#0a0e1a",color:"#f1f5f9",fontFamily:"'Segoe UI',system-ui,sans-serif",direction:"rtl",paddingBottom:100}}>
       {renderPanel()}
@@ -1193,17 +1267,16 @@ export default function App() {
         <div style={{maxWidth:480,margin:"0 auto"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
             <div>
-              <div style={{fontSize:14,fontWeight:800,color:"#f1f5f9"}}>🏠 Family Life OS <span style={{fontSize:10,color:"#4B5563",fontWeight:400}}>v7</span></div>
+              <div style={{fontSize:14,fontWeight:800,color:"#f1f5f9"}}>🏠 Family Life OS <span style={{fontSize:10,color:"#4B5563",fontWeight:400}}>v6</span></div>
               <div style={{fontSize:11,color:"#6B7280"}}>{names.A} & {names.B}</div>
             </div>
-            <select value={season} onChange={e=>setSeason(e.target.value)} style={{background:"#1F2937",border:"1px solid #2d3748",borderRadius:10,padding:"4px 10px",color:"#9CA3AF",fontSize:12,cursor:"pointer",outline:"none"}}>
+            <select value={season} onChange={e=>updateSeason(e.target.value)} style={{background:"#1F2937",border:"1px solid #2d3748",borderRadius:10,padding:"4px 10px",color:"#9CA3AF",fontSize:12,cursor:"pointer",outline:"none"}}>
               {SEASONS.map(s=><option key={s} value={s}>{s}</option>)}
             </select>
           </div>
           <ViewBar mode={viewMode} onMode={setViewMode} selDate={selDate} onDate={setSelDate}/>
         </div>
       </div>
-
       <div style={{maxWidth:480,margin:"0 auto",padding:"14px 14px"}}>
         <div style={{marginBottom:10}}>
           <div style={{fontSize:18,fontWeight:800}}>
@@ -1211,9 +1284,7 @@ export default function App() {
             {selDate===TODAY&&<span style={{fontSize:11,background:"#4338CA",color:"#C7D2FE",borderRadius:8,padding:"2px 8px",marginRight:8,fontWeight:400}}>היום</span>}
           </div>
         </div>
-
         <SmartAlerts alerts={alerts} onDismiss={i=>setDismissedAlerts(d=>[...d,i])}/>
-
         {nextAction&&selDate===TODAY&&(
           <div style={{background:"linear-gradient(135deg,#7C3AED22,#DB277722)",border:"1px solid #7C3AED55",borderRadius:14,padding:"12px 16px",marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
             <div style={{fontSize:20}}>👉</div>
@@ -1223,7 +1294,6 @@ export default function App() {
             </div>
           </div>
         )}
-
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:14}}>
           {["A","B"].map(k=>{
             const gl=k==="A"?goals.A:goals.B; const dl=k==="A"?goals.doneA:goals.doneB; const color=PCOLORS[k];
@@ -1241,10 +1311,8 @@ export default function App() {
             );
           })}
         </div>
-
         {CARDS.map(card=><BigCard key={card.id} {...card} onClick={()=>setOpenPanel(card.id)}/>)}
       </div>
-
       <div style={{position:"fixed",bottom:0,left:0,right:0,background:"#111827",borderTop:"1px solid #1F2937",padding:"10px 16px",backdropFilter:"blur(10px)"}}>
         <div style={{maxWidth:480,margin:"0 auto",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
           <div style={{display:"flex",gap:12}}>
