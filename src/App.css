@@ -1,7 +1,13 @@
+:root {
+  --bg-color: #f4f6f0;      /* רקע ירוק-לבן עדין מאוד */
+  --text-main: #3e2723;     /* טקסט קפה כהה */
+}
+
 body {
   margin: 0;
   padding: 0;
-  background-color: #0a0e1a; /* הצבע הכהה של האפליקציה שלך */
+  background-color: var(--bg-color);
+  color: var(--text-main);
   font-family: 'Segoe UI', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
@@ -11,7 +17,6 @@ body {
   box-sizing: border-box;
 }
 
-/* ביטול גלילה מיותרת בנייד */
 #root {
   width: 100%;
   min-height: 100vh;
