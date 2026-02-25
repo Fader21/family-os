@@ -1,0 +1,1273 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+// ── Constants ────────────────────────────────────────────────
+const DAYS_HE = ["ראשון","שני","שלישי","רביעי","חמישי","שישי","שבת"];
+const DAYS_SHORT = ["א׳","ב׳","ג׳","ד׳","ה׳","ו׳","ש׳"];
+const MONTHS_HE = ["ינואר","פברואר","מרץ","אפריל","מאי","יוני","יולי","אוגוסט","ספטמבר","אוקטובר","נובמבר","דצמבר"];
+const WORKOUT_TYPES = ["ריצה","אופניים","כוח","טאבטה","זומבה","קל","שחייה"];
+const SEASONS = ["חורף","אביב","קיץ","סתיו"];
+
+const gid = () => Math.random().toString(36).slice(2,9);
+const pad = n => String(n).padStart(2,"0");
+const todayKey = () => { const n=new Date(); return `${n.getFullYear()}-${pad(n.getMonth()+1)}-${pad(n.getDate())}`; };
+const addDays = (dk,n) => { const d=new Date(dk+"T12:00:00"); d.setDate(d.getDate()+n); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+const weekOf = dk => { const d=new Date(dk+"T12:00:00"); d.setDate(d.getDate()-d.getDay()); const base=`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; return Array.from({length:7},(_,i)=>addDays(base,i)); };
+const monthOf = dk => { const d=new Date(dk+"T12:00:00"); const y=d.getFullYear(), m=d.getMonth(); const days=[]; for(let i=1;i<=new Date(y,m+1,0).getDate();i++) days.push(`${y}-${pad(m+1)}-${pad(i)}`); return days; };
+const fmtDate = dk => { const d=new Date(dk+"T12:00:00"); return `${d.getDate()} ${MONTHS_HE[d.getMonth()]}`; };
+const dowOf = dk => new Date(dk+"T12:00:00").getDay();
+const fmtTimer = s => `${pad(Math.floor(s/60))}:${pad(s%60)}`;
+const addMins = (timeStr, mins) => { if(!timeStr) return ""; const [h,m]=timeStr.split(":").map(Number); const t=h*60+m+mins; return `${pad(Math.floor(t/60)%24)}:${pad(t%60)}`; };
+const timeToMins = t => { if(!t) return 0; const [h,m]=t.split(":").map(Number); return h*60+m; };
+
+// ══════════════════════════════════════════════════════════════
+// 🔄 STORAGE — localStorage (Fixed & Safe)
+// ══════════════════════════════════════════════════════════════
+const LS = {
+  get: (k, fb) => {
+    try {
+      const v = localStorage.getItem("fos_" + k);
+      return v !== null ? JSON.parse(v) : fb;
+    } catch { return fb; }
+  },
+  set: (k, v) => {
+    try { localStorage.setItem("fos_" + k, JSON.stringify(v)); } catch {}
+  }
+};
+
+const SHOE_SOCK_MAP = {"נעלי ספורט":"גרביים לבנות קצרות","נעלי אלגנט":"גרביים ארוכות","בלנסטון":"גרביים ארוכות"};
+const SHIFTS = [
+  {id:"none",        label:"אין משמרת",            color:"#374151", emoji:"—"},
+  {id:"morning",     label:"בוקר 07:00–15:00",      color:"#F59E0B", emoji:"🌅"},
+  {id:"morning_ext", label:"בוקר+ססיה 07:00–19:00", color:"#EF4444", emoji:"🔥"},
+];
+
+function getMakeupAvailability(shiftId) {
+  if (!shiftId || shiftId === "none")    return { makeup: true,  lashes: true,  note: null };
+  if (shiftId === "morning")             return { makeup: true,  lashes: true,  note: "⚠️ בוקר בלבד – איפור רק אחה\"צ, ריסים בכל שעה" };
+  if (shiftId === "morning_ext")         return { makeup: false, lashes: true,  note: "🔥 ססיה – ריסים בלבד (איפור לא זמין)" };
+  return { makeup: true, lashes: true, note: null };
+}
+
+function buildAutoTasks(shiftId, travelMin, kidName) {
+  if(!shiftId||shiftId==="none") return {today:[],prevDay:[]};
+  const t = [{id:gid(),text:`🚌 להביא את ${kidName} לגן (07:00)`,done:false,auto:true,time:"07:00"}];
+  if(shiftId==="morning_ext"){
+    t.push({id:gid(),text:`🚗 לאסוף את ${kidName} מהגן (~18:30)`,done:false,auto:true,time:"18:30"});
+    if(travelMin) t.push({id:gid(),text:`⏰ לצאת מהעבודה ${travelMin} דק׳ לפני האיסוף`,done:false,auto:true,time:""});
+  } else {
+    t.push({id:gid(),text:`✅ חנה אוספת את ${kidName} (15:00)`,done:false,auto:true,time:"14:45"});
+  }
+  return {today:t, prevDay:[{id:gid(),text:`👕 להכין בגדים ל${kidName} למחר`,done:false,auto:true}]};
+}
+
+// ── Tiny UI ──────────────────────────────────────────────────
+const Chip = ({label,active,color="#7C3AED",onClick,emoji,small}) => (
+  <button onClick={onClick} style={{padding:small?"3px 8px":"5px 12px",borderRadius:20,border:`2px solid ${active?color:color+"33"}`,background:active?color:"transparent",color:active?"#fff":color,cursor:"pointer",fontSize:small?11:12,fontWeight:active?700:400,display:"flex",alignItems:"center",gap:4,whiteSpace:"nowrap",transition:"all .15s"}}>
+    {emoji&&<span>{emoji}</span>}{label}
+  </button>
+);
+const Tog = ({value,onChange,color="#7C3AED",size=20}) => (
+  <button onClick={()=>onChange(!value)} style={{width:size*1.8,height:size,borderRadius:size/2,border:"none",cursor:"pointer",background:value?color:"#1F2937",position:"relative",transition:"background .2s",flexShrink:0}}>
+    <div style={{width:size-4,height:size-4,borderRadius:"50%",background:"#fff",position:"absolute",top:2,left:value?size*1.8-size+2:2,transition:"left .2s",boxShadow:"0 1px 3px rgba(0,0,0,.3)"}}/>
+  </button>
+);
+const Inp = ({value,onChange,placeholder,type="text",style={}}) => (
+  <input type={type} value={value||""} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+    style={{background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"7px 12px",color:"#f1f5f9",fontSize:13,width:"100%",boxSizing:"border-box",outline:"none",...style}}/>
+);
+
+function Confetti({x,y,onDone}) {
+  useEffect(()=>{ const t=setTimeout(onDone,900); return ()=>clearTimeout(t); },[]);
+  return (
+    <div style={{position:"fixed",left:x-30,top:y-30,width:60,height:60,pointerEvents:"none",zIndex:9999}}>
+      {["⭐","✨","🎉","💜","🩷"].map((e,i)=>(
+        <div key={i} style={{position:"absolute",left:"50%",top:"50%",fontSize:16,animation:`burst${i} 0.8s ease-out forwards`,opacity:0}}>
+          <style>{`@keyframes burst${i}{0%{transform:translate(-50%,-50%) scale(0);opacity:1}100%{transform:translate(${Math.cos(i*72*Math.PI/180)*40}px,${Math.sin(i*72*Math.PI/180)*40}px) scale(1);opacity:0}}`}</style>
+          {e}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function BigCard({emoji,title,subtitle,color,onClick,done,urgent,hidden}) {
+  if(hidden) return null;
+  const bg = done?"#0a0e1a":urgent?color+"22":color+"11";
+  const border = done?"#1f2937":urgent?color:color+"44";
+  return (
+    <div onClick={onClick} style={{display:"flex",alignItems:"center",gap:14,padding:"14px 16px",borderRadius:16,border:`2px solid ${border}`,background:bg,cursor:"pointer",marginBottom:8,transition:"all .2s",position:"relative",overflow:"hidden"}}>
+      {urgent&&!done&&<div style={{position:"absolute",top:0,right:0,background:color,color:"#fff",fontSize:10,padding:"2px 8px",borderRadius:"0 16px 0 8px",fontWeight:700}}>דחוף</div>}
+      <div style={{width:48,height:48,borderRadius:14,background:done?"#1f2937":color+"22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,flexShrink:0,border:`1px solid ${done?"#374151":color+"44"}`}}>
+        {done?"✅":emoji}
+      </div>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontSize:14,fontWeight:700,color:done?"#4B5563":color,marginBottom:2}}>{title}</div>
+        {subtitle&&<div style={{fontSize:12,color:"#6B7280",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{subtitle}</div>}
+      </div>
+      <div style={{fontSize:18,color:done?"#4B5563":color}}>›</div>
+    </div>
+  );
+}
+
+function Panel({title,color,onClose,children}) {
+  return (
+    <div style={{position:"fixed",inset:0,zIndex:200,display:"flex",flexDirection:"column"}}>
+      <div onClick={onClose} style={{flex:1,background:"rgba(0,0,0,.6)"}}/>
+      <div style={{background:"#111827",borderRadius:"24px 24px 0 0",maxHeight:"88vh",overflow:"auto",padding:"0 0 40px 0"}}>
+        <div style={{padding:"16px 20px 12px",borderBottom:"1px solid #1f2937",display:"flex",alignItems:"center",gap:12,position:"sticky",top:0,background:"#111827",zIndex:1}}>
+          <div style={{flex:1,fontSize:16,fontWeight:800,color}}>{title}</div>
+          <button onClick={onClose} style={{background:"#1f2937",border:"none",borderRadius:10,padding:"6px 14px",color:"#9CA3AF",cursor:"pointer",fontSize:13}}>סגור ✕</button>
+        </div>
+        <div style={{padding:"16px 20px"}}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function CR({text,done,onToggle,onDelete,auto,time,color="#10B981"}) {
+  const ref=useRef(null);
+  const [conf,setConf]=useState(null);
+  const handle=()=>{ if(!done&&ref.current){const r=ref.current.getBoundingClientRect();setConf({x:r.left,y:r.top});} onToggle(); };
+  return (
+    <>
+      {conf&&<Confetti x={conf.x} y={conf.y} onDone={()=>setConf(null)}/>}
+      <div ref={ref} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid #0D0F18"}}>
+        <button onClick={handle} style={{width:22,height:22,borderRadius:7,border:`2px solid ${done?color:"#374151"}`,background:done?color:"transparent",cursor:"pointer",flexShrink:0,color:"#fff",fontSize:12,display:"flex",alignItems:"center",justifyContent:"center",transition:"all .15s"}}>{done?"✓":""}</button>
+        {time&&<span style={{fontSize:10,color:"#6B7280",width:40,flexShrink:0}}>{time}</span>}
+        <span style={{flex:1,fontSize:13,color:done?"#4B5563":"#e2e8f0",textDecoration:done?"line-through":"none"}}>
+          {auto&&<span style={{fontSize:10,color:"#818CF8",marginLeft:4}}>⚡</span>}{text}
+        </span>
+        {!auto&&onDelete&&<button onClick={onDelete} style={{background:"none",border:"none",color:"#374151",cursor:"pointer",fontSize:14,padding:0,lineHeight:1}}>×</button>}
+      </div>
+    </>
+  );
+}
+
+function AddRow({onAdd,placeholder,onAddRec}) {
+  const [v,setV]=useState("");
+  const go=rec=>{if(v.trim()){rec?onAddRec(v.trim()):onAdd(v.trim());setV("");}};
+  return (
+    <div style={{display:"flex",gap:6,marginTop:8}}>
+      <input value={v} onChange={e=>setV(e.target.value)} onKeyDown={e=>e.key==="Enter"&&go(false)} placeholder={placeholder}
+        style={{flex:1,background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"6px 12px",color:"#f1f5f9",fontSize:12,outline:"none"}}/>
+      <button onClick={()=>go(false)} style={{background:"#7C3AED",border:"none",borderRadius:10,padding:"6px 14px",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700}}>+</button>
+      {onAddRec&&<button onClick={()=>go(true)} title="קבועה" style={{background:"#1F2937",border:"none",borderRadius:10,padding:"6px 10px",color:"#6B7280",cursor:"pointer",fontSize:11}}>🔁</button>}
+    </div>
+  );
+}
+
+function SmartAlerts({alerts, onDismiss}) {
+  if(!alerts||alerts.length===0) return null;
+  return (
+    <div style={{marginBottom:12}}>
+      {alerts.map((a,i)=>(
+        <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:12,background:a.level==="warn"?"#F59E0B11":"#EF444411",border:`1px solid ${a.level==="warn"?"#F59E0B33":"#EF444433"}`,marginBottom:6}}>
+          <span style={{fontSize:16}}>{a.level==="warn"?"⚠️":"❗"}</span>
+          <span style={{flex:1,fontSize:12,color:a.level==="warn"?"#FCD34D":"#FCA5A5",fontWeight:500}}>{a.text}</span>
+          <button onClick={()=>onDismiss(i)} style={{background:"none",border:"none",color:"#6B7280",cursor:"pointer",fontSize:16,padding:0,lineHeight:1}}>×</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── PANELS ───────────────────────────────────────────────────
+
+function ShiftPanel({data,onShiftChange,travelMin,onUpdateTravel,kidName,onClose}) {
+  const shift=data?.shift||"none";
+  return (
+    <Panel title="🏥 משמרת חנה" color="#3B82F6" onClose={onClose}>
+      <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
+        {SHIFTS.map(s=>(
+          <button key={s.id} onClick={()=>{const a=buildAutoTasks(s.id,travelMin,kidName);onShiftChange(s.id,a);}} style={{padding:"14px 16px",borderRadius:14,border:`2px solid ${shift===s.id?s.color:s.color+"33"}`,background:shift===s.id?s.color+"22":"transparent",cursor:"pointer",textAlign:"right",display:"flex",alignItems:"center",gap:12,transition:"all .15s"}}>
+            <span style={{fontSize:24}}>{s.emoji}</span>
+            <div style={{flex:1,textAlign:"right"}}><div style={{fontSize:14,fontWeight:700,color:shift===s.id?s.color:"#D1D5DB"}}>{s.label}</div></div>
+            {shift===s.id&&<div style={{fontSize:20,color:s.color}}>✓</div>}
+          </button>
+        ))}
+      </div>
+      {shift==="morning_ext"&&(
+        <div style={{background:"#EF444411",borderRadius:12,padding:12}}>
+          <div style={{fontSize:13,color:"#EF4444",fontWeight:700,marginBottom:8}}>⚡ משימות אוטומטיות נוצרו למשה</div>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginTop:6}}>
+            <span style={{fontSize:12,color:"#9CA3AF"}}>⏱ זמן נסיעה:</span>
+            <input type="number" value={travelMin||""} onChange={e=>onUpdateTravel(Number(e.target.value))} placeholder="דקות" style={{width:64,background:"#111827",border:"1px solid #374151",borderRadius:8,padding:"4px 8px",color:"#f9fafb",fontSize:13,outline:"none"}}/>
+            <span style={{fontSize:11,color:"#6B7280"}}>דקות</span>
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function MakeupPanel({data, onUpdate, shiftId, kidName, onClose}) {
+  const clients = data?.clients || [];
+  const [editIdx, setEditIdx] = useState(null);
+  const avail = getMakeupAvailability(shiftId);
+  const blankClient = () => ({ id:gid(), firstName:"", lastName:"", phone:"", type:"makeup", heads:1, atHome:true, address:"", time:"", endTime:"", depositPaid:false });
+  const addClient = (type) => {
+    const nc = {...blankClient(), type};
+    const updated = [...clients, nc];
+    onUpdate({...data, clients:updated});
+    setEditIdx(updated.length-1);
+  };
+  const updateClient = (idx, patch) => {
+    const updated = clients.map((c,i)=>{
+      if(i!==idx) return c;
+      const merged = {...c,...patch};
+      if((patch.time!==undefined||patch.type!==undefined) && merged.type==="lashes" && merged.time) {
+        merged.endTime = addMins(merged.time, 20);
+      }
+      return merged;
+    });
+    onUpdate({...data, clients:updated});
+  };
+  const removeClient = (idx) => { onUpdate({...data, clients:clients.filter((_,i)=>i!==idx)}); if(editIdx===idx) setEditIdx(null); };
+  const isPhoneValid = (ph) => (ph||"").replace(/\D/g,"").length === 10;
+  const lastEnd = clients.reduce((max, c) => c.endTime && timeToMins(c.endTime) > max ? timeToMins(c.endTime) : max, 0);
+  const needsEarlyLeave = lastEnd > timeToMins("15:45");
+  return (
+    <Panel title="💄 איפור / ריסים" color="#A855F7" onClose={onClose}>
+      {avail.note && (
+        <div style={{background:"#F59E0B11",borderRadius:12,padding:12,marginBottom:14,border:"1px solid #F59E0B33"}}>
+          <div style={{fontSize:13,color:"#FCD34D",fontWeight:600}}>{avail.note}</div>
+        </div>
+      )}
+      {needsEarlyLeave && (
+        <div style={{background:"#EF444422",borderRadius:12,padding:10,marginBottom:12,border:"1px solid #EF444444",fontSize:12,color:"#FCA5A5",fontWeight:600}}>
+          ⚡ חנה מסיימת אחרי 15:45 → נוצרת משימה למשה לאסוף את {kidName}
+        </div>
+      )}
+      {clients.length===0 && <div style={{textAlign:"center",padding:"20px 0",color:"#4B5563",fontSize:14}}>אין לקוחות להיום</div>}
+      {clients.map((c,idx)=>{
+        const fullName = [c.firstName,c.lastName].filter(Boolean).join(" ")||"לקוחה ללא שם";
+        const phoneBad = c.phone && !isPhoneValid(c.phone);
+        const isOpen = editIdx===idx;
+        return (
+          <div key={c.id} style={{marginBottom:10,borderRadius:14,border:`2px solid ${isOpen?"#A855F7":"#A855F733"}`,background:isOpen?"#A855F711":"#0f141f",overflow:"hidden"}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px",cursor:"pointer"}} onClick={()=>setEditIdx(isOpen?null:idx)}>
+              <span style={{fontSize:20}}>{c.type==="lashes"?"👁️":"💄"}</span>
+              <div style={{flex:1}}>
+                <div style={{fontSize:13,fontWeight:700,color:"#A855F7"}}>{fullName}</div>
+                <div style={{fontSize:11,color:phoneBad?"#EF4444":"#6B7280"}}>
+                  {c.phone?(phoneBad?`⚠️ טלפון לא תקין: ${c.phone}`:c.phone):""}{c.time?` • ${c.time}`:""}{c.endTime?`–${c.endTime}`:""}
+                </div>
+              </div>
+              <button onClick={e=>{e.stopPropagation();removeClient(idx);}} style={{background:"#EF444422",border:"none",borderRadius:8,padding:"4px 8px",color:"#EF4444",cursor:"pointer",fontSize:12}}>מחק</button>
+              <span style={{color:"#A855F7",fontSize:16}}>{isOpen?"▲":"▼"}</span>
+            </div>
+            {isOpen&&(
+              <div style={{padding:"0 14px 14px"}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+                  <div><div style={{fontSize:10,color:"#6B7280",marginBottom:3}}>שם פרטי</div><Inp value={c.firstName} onChange={v=>updateClient(idx,{firstName:v})} placeholder="שם פרטי"/></div>
+                  <div><div style={{fontSize:10,color:"#6B7280",marginBottom:3}}>שם משפחה</div><Inp value={c.lastName} onChange={v=>updateClient(idx,{lastName:v})} placeholder="שם משפחה"/></div>
+                  <div style={{gridColumn:"1/-1"}}>
+                    <div style={{fontSize:10,color:phoneBad?"#EF4444":"#6B7280",marginBottom:3}}>{phoneBad?"⚠️ מספר חסר – 10 ספרות נדרשות":"📱 טלפון"}</div>
+                    <Inp value={c.phone} onChange={v=>updateClient(idx,{phone:v})} placeholder="0501234567" style={{border:`1px solid ${phoneBad?"#EF4444":"#2d3748"}`}}/>
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+                  {avail.makeup&&<Chip label="💄 איפור" active={c.type==="makeup"} color="#A855F7" onClick={()=>updateClient(idx,{type:"makeup"})}/>}
+                  {avail.lashes&&<Chip label="👁️ ריסים (20 דק׳)" active={c.type==="lashes"} color="#818CF8" onClick={()=>updateClient(idx,{type:"lashes"})}/>}
+                </div>
+                {c.type==="makeup"&&(
+                  <>
+                    <div style={{marginBottom:8}}>
+                      <div style={{fontSize:12,color:"#9CA3AF",marginBottom:4}}>מס׳ ראשים</div>
+                      <div style={{display:"flex",gap:6}}>
+                        {[1,2,3,4].map(n=><button key={n} onClick={()=>updateClient(idx,{heads:n})} style={{width:40,height:40,borderRadius:10,border:`2px solid ${c.heads===n?"#A855F7":"#374151"}`,background:c.heads===n?"#A855F722":"transparent",color:c.heads===n?"#A855F7":"#6B7280",cursor:"pointer",fontSize:16,fontWeight:700}}>{n}</button>)}
+                      </div>
+                    </div>
+                    <div style={{display:"flex",gap:8,marginBottom:8}}>
+                      <Chip label="🏠 בבית חנה" active={c.atHome} color="#A855F7" onClick={()=>updateClient(idx,{atHome:true,address:""})}/>
+                      <Chip label="🚗 בבית הלקוחה" active={!c.atHome} color="#EC4899" onClick={()=>updateClient(idx,{atHome:false})}/>
+                    </div>
+                    {!c.atHome&&<div style={{marginBottom:8}}><Inp value={c.address} onChange={v=>updateClient(idx,{address:v})} placeholder="כתובת..."/></div>}
+                  </>
+                )}
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                  <div><div style={{fontSize:10,color:"#6B7280",marginBottom:3}}>🕐 התחלה</div><Inp type="time" value={c.time} onChange={v=>updateClient(idx,{time:v})}/></div>
+                  <div><div style={{fontSize:10,color:"#6B7280",marginBottom:3}}>{c.type==="lashes"?"🕐 סיום (אוטו׳)":"🕐 סיום"}</div><Inp type="time" value={c.endTime} onChange={v=>updateClient(idx,{endTime:v})} style={{opacity:c.type==="lashes"?0.6:1}}/></div>
+                </div>
+                {c.type==="makeup"&&(
+                  <div style={{display:"flex",alignItems:"center",gap:10,background:"#A855F711",borderRadius:10,padding:"8px 12px"}}>
+                    <Tog value={c.depositPaid} onChange={v=>updateClient(idx,{depositPaid:v})} color="#10B981"/>
+                    <span style={{fontSize:13,color:c.depositPaid?"#10B981":"#EF4444",fontWeight:600}}>{c.depositPaid?"✓ מקדמה שולמה":"✗ מקדמה חסרה"}</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+      <div style={{display:"flex",gap:8,marginTop:8}}>
+        {avail.makeup&&<button onClick={()=>addClient("makeup")} style={{flex:1,background:"#A855F711",border:"2px dashed #A855F755",borderRadius:12,padding:"10px",color:"#A855F7",cursor:"pointer",fontWeight:700,fontSize:13}}>+ איפור</button>}
+        {avail.lashes&&<button onClick={()=>addClient("lashes")} style={{flex:1,background:"#818CF811",border:"2px dashed #818CF855",borderRadius:12,padding:"10px",color:"#818CF8",cursor:"pointer",fontWeight:700,fontSize:13}}>+ ריסים</button>}
+      </div>
+      {clients.length>0&&(
+        <div style={{marginTop:14,padding:"12px 14px",background:"#111827",borderRadius:12}}>
+          <div style={{fontSize:11,color:"#6B7280",marginBottom:3}}>סה״כ היום</div>
+          <div style={{fontSize:20,fontWeight:800,color:"#A855F7"}}>
+            {clients.reduce((s,c)=>{
+              if(c.type==="lashes") return s+90;
+              const base=350, extra=Math.max(0,(c.heads||1)-1)*150, travel=c.atHome?0:150;
+              return s+base+extra+travel;
+            },0).toLocaleString()} ₪
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+const DEFAULT_CATS = {
+  moshe: ["חולצות","מכנסיים","גרביים","נעליים","ג'קטים","אביזרים"],
+  hana:  ["חולצות","מכנסיים","שמלות","חצאיות","ג'קטים","נעליים","גרביים","חזיות","אביזרים"],
+  uri:   ["חולצות","מכנסיים","גרביים","נעליים","מעיל"],
+};
+function OutfitPanel({wardrobeM,wardrobeH,wardrobeU,catsM,catsH,catsU,dataM,dataH,dataU,onM,onH,onU,onWM,onWH,onWU,onCM,onCH,onCU,season,onClose}) {
+  const [tab,setTab]=useState("moshe");
+  const [wardrobeMode,setWardrobeMode]=useState(false);
+  const [editCats,setEditCats]=useState(false);
+  const [newCat,setNewCat]=useState("");
+  const PEOPLE=[
+    {key:"moshe",label:"💜 משה",color:"#7C3AED",data:dataM,set:onM,ward:wardrobeM,setW:onWM,cats:catsM||DEFAULT_CATS.moshe,setCats:onCM},
+    {key:"hana", label:"🩷 חנה", color:"#DB2777",data:dataH,set:onH,ward:wardrobeH,setW:onWH,cats:catsH||DEFAULT_CATS.hana, setCats:onCH},
+    {key:"uri",  label:"👦 אורי",color:"#06B6D4",data:dataU,set:onU,ward:wardrobeU,setW:onWU,cats:catsU||DEFAULT_CATS.uri,  setCats:onCU},
+  ];
+  const cur=PEOPLE.find(p=>p.key===tab);
+  const suggest=()=>{
+    const s={};
+    cur.cats.forEach(cat=>{
+      if(cat==="גרביים") return;
+      const a=cur.ward[cat]||[];
+      if(a.length) s[cat]=a[Math.floor(Math.random()*a.length)];
+    });
+    const shoe=s["נעליים"];
+    if(shoe&&SHOE_SOCK_MAP[shoe]) s["גרביים"]=SHOE_SOCK_MAP[shoe];
+    else { const socks=cur.ward["גרביים"]||[]; if(socks.length) s["גרביים"]=socks[Math.floor(Math.random()*socks.length)]; }
+    cur.set({...cur.data,suggested:s,confirmed:false});
+  };
+  const handleFieldChange=(cat,val)=>{
+    const newSug={...cur.data?.suggested,[cat]:val};
+    if(cat==="נעליים"&&SHOE_SOCK_MAP[val]) newSug["גרביים"]=SHOE_SOCK_MAP[val];
+    cur.set({...cur.data,suggested:newSug});
+  };
+  const renameCat=(oldName,newName)=>{
+    if(!newName.trim()||oldName===newName.trim()) return;
+    const cats=cur.cats.map(c=>c===oldName?newName.trim():c);
+    const ward={...cur.ward};
+    if(ward[oldName]) { ward[newName.trim()]=ward[oldName]; delete ward[oldName]; }
+    cur.setCats(cats); cur.setW(ward);
+  };
+  const deleteCat=(cat)=>{
+    const cats=cur.cats.filter(c=>c!==cat);
+    const ward={...cur.ward};
+    delete ward[cat];
+    cur.setCats(cats); cur.setW(ward);
+  };
+  return (
+    <Panel title="👗 לבוש" color="#EC4899" onClose={onClose}>
+      <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
+        {PEOPLE.map(p=><Chip key={p.key} label={p.label} active={tab===p.key} color={p.color} onClick={()=>setTab(p.key)}/>)}
+        <Chip label={wardrobeMode?"← חזרה":"🗂️ ארון"} active={wardrobeMode} color="#6B7280" onClick={()=>{setWardrobeMode(w=>!w);setEditCats(false);}}/>
+      </div>
+      {!wardrobeMode?(
+        <>
+          <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>
+            {SEASONS.map(s=><div key={s} style={{padding:"3px 10px",borderRadius:10,background:season===s?"#374151":"transparent",border:"1px solid #374151",fontSize:12,color:season===s?"#f9fafb":"#6B7280"}}>{s}</div>)}
+          </div>
+          <button onClick={suggest} style={{width:"100%",background:`linear-gradient(135deg,${cur.color}33,${cur.color}11)`,border:`2px dashed ${cur.color}55`,borderRadius:14,padding:"12px",color:cur.color,cursor:"pointer",fontWeight:700,fontSize:14,marginBottom:14}}>
+            ✨ הצע קומבינציה
+          </button>
+          {Object.keys(cur.data?.suggested||{}).length>0&&(
+            <>
+              {cur.cats.map(cat=>{
+                const opts=cur.ward[cat]||[], val=cur.data?.suggested?.[cat]||"";
+                const isAutoSock=cat==="גרביים"&&SHOE_SOCK_MAP[cur.data?.suggested?.["נעליים"]];
+                return (
+                  <div key={cat} style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+                    <div style={{width:80,fontSize:11,color:"#6B7280",flexShrink:0}}>{cat}{isAutoSock&&<span style={{color:"#818CF8",fontSize:9}}> ⚡</span>}</div>
+                    {opts.length?(
+                      <select value={val} onChange={e=>handleFieldChange(cat,e.target.value)} style={{flex:1,background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"6px 10px",color:"#f1f5f9",fontSize:12,outline:"none"}}>
+                        <option value="">—</option>{opts.map((o,i)=><option key={i} value={o}>{o}</option>)}
+                      </select>
+                    ):(
+                      <input value={val} onChange={e=>handleFieldChange(cat,e.target.value)} style={{flex:1,background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"6px 10px",color:"#f1f5f9",fontSize:12,outline:"none"}}/>
+                    )}
+                  </div>
+                );
+              })}
+              <div style={{display:"flex",alignItems:"center",gap:10,marginTop:10,padding:"10px 12px",background:cur.data?.confirmed?cur.color+"22":"#1F2937",borderRadius:12}}>
+                <Tog value={cur.data?.confirmed} onChange={v=>cur.set({...cur.data,confirmed:v})} color={cur.color}/>
+                <span style={{fontSize:13,color:cur.data?.confirmed?cur.color:"#6B7280",fontWeight:cur.data?.confirmed?700:400}}>{cur.data?.confirmed?"✅ תלבושת אושרה!":"לאשר תלבושת"}</span>
+              </div>
+            </>
+          )}
+        </>
+      ):(
+        <>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+            <div style={{fontSize:13,color:cur.color,fontWeight:700}}>קטגוריות {cur.label}</div>
+            <button onClick={()=>setEditCats(e=>!e)} style={{background:"#1F2937",border:"none",borderRadius:10,padding:"5px 12px",color:"#9CA3AF",cursor:"pointer",fontSize:12}}>{editCats?"✓ סיום":"✏️ ערוך קטגוריות"}</button>
+          </div>
+          {editCats?(
+            <>
+              {cur.cats.map(cat=>(
+                <div key={cat} style={{display:"flex",gap:6,marginBottom:6,alignItems:"center"}}>
+                  <input defaultValue={cat} onBlur={e=>renameCat(cat,e.target.value)} style={{flex:1,background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"6px 12px",color:"#f1f5f9",fontSize:13,outline:"none"}}/>
+                  <button onClick={()=>deleteCat(cat)} style={{background:"#EF444422",border:"none",borderRadius:8,padding:"5px 10px",color:"#EF4444",cursor:"pointer",fontSize:13}}>×</button>
+                </div>
+              ))}
+              <div style={{display:"flex",gap:6,marginTop:6}}>
+                <input value={newCat} onChange={e=>setNewCat(e.target.value)} placeholder="+ קטגוריה חדשה..." style={{flex:1,background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"6px 12px",color:"#f1f5f9",fontSize:12,outline:"none"}}/>
+                <button onClick={()=>{if(newCat.trim()){cur.setCats([...cur.cats,newCat.trim()]);setNewCat("");}}} style={{background:cur.color,border:"none",borderRadius:10,padding:"6px 14px",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700}}>+</button>
+              </div>
+            </>
+          ):(
+            cur.cats.map(cat=>(
+              <div key={cat} style={{marginBottom:12}}>
+                <div style={{fontSize:12,color:cur.color,fontWeight:700,marginBottom:6}}>{cat}</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:6}}>
+                  {(cur.ward[cat]||[]).map((item,i)=>(
+                    <div key={i} style={{background:"#1F2937",borderRadius:8,padding:"4px 12px",fontSize:12,color:"#D1D5DB",display:"flex",alignItems:"center",gap:6}}>
+                      {item}<button onClick={()=>{const w={...cur.ward};w[cat]=w[cat].filter((_,j)=>j!==i);cur.setW(w);}} style={{background:"none",border:"none",color:"#4B5563",cursor:"pointer",fontSize:12,padding:0,lineHeight:1}}>×</button>
+                    </div>
+                  ))}
+                </div>
+                <AddRow placeholder={`+ ${cat}`} onAdd={t=>{const w={...cur.ward};w[cat]=[...(w[cat]||[]),t];cur.setW(w);}}/>
+              </div>
+            ))
+          )}
+        </>
+      )}
+    </Panel>
+  );
+}
+
+function MealsPanel({data,templates,onUpdate,onUpdateTpl,onClose}) {
+  const [newTpl,setNewTpl]=useState("");
+  const d=data||{};
+  const set=(k,v)=>onUpdate({...d,[k]:v});
+  const MEALS=[
+    {k:"breakfast",l:"🌅 ארוחת בוקר"},
+    {k:"lunch",    l:"☀️ ארוחת צהריים"},
+    {k:"snack",    l:"🍎 ביניים"},
+    {k:"dinner",   l:"🌙 ארוחת ערב"},
+  ];
+  const getMeal=(k) => d[k]||{main:"",extras:[],dessert:""};
+  const setMeal=(k,v) => set(k,v);
+  const addExtra=(k) => { const m=getMeal(k); setMeal(k,{...m,extras:[...(m.extras||[]),""]}) };
+  const setExtra=(k,i,v) => { const m=getMeal(k); const ex=[...(m.extras||[])]; ex[i]=v; setMeal(k,{...m,extras:ex}); };
+  const removeExtra=(k,i) => { const m=getMeal(k); setMeal(k,{...m,extras:(m.extras||[]).filter((_,j)=>j!==i)}); };
+  return (
+    <Panel title="🍽️ ארוחות" color="#10B981" onClose={onClose}>
+      {MEALS.map(({k,l})=>{
+        const meal=getMeal(k);
+        return (
+          <div key={k} style={{marginBottom:12,padding:"12px 14px",background:"#111827",borderRadius:14,border:"1px solid #1F2937"}}>
+            <div style={{fontSize:12,color:"#10B981",fontWeight:700,marginBottom:8}}>{l}</div>
+            <div style={{display:"flex",gap:6,marginBottom:6}}>
+              <input value={meal.main} onChange={e=>setMeal(k,{...meal,main:e.target.value})} placeholder="מנה עיקרית..."
+                style={{flex:1,background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"6px 12px",color:"#f1f5f9",fontSize:13,outline:"none"}}/>
+              {templates.length>0&&(
+                <select onChange={e=>e.target.value&&setMeal(k,{...meal,main:e.target.value})} value="" style={{background:"#1F2937",border:"1px solid #2d3748",borderRadius:10,padding:"0 8px",color:"#9CA3AF",fontSize:12,cursor:"pointer",flexShrink:0,outline:"none"}}>
+                  <option value="">📋</option>{templates.map(t=><option key={t.id} value={t.name}>{t.name}</option>)}
+                </select>
+              )}
+            </div>
+            {(meal.extras||[]).map((ex,i)=>(
+              <div key={i} style={{display:"flex",gap:4,marginBottom:4}}>
+                <div style={{width:3,background:"#10B98144",borderRadius:2,flexShrink:0}}/>
+                <input value={ex} onChange={e=>setExtra(k,i,e.target.value)} placeholder={`תוספת ${i+1}...`}
+                  style={{flex:1,background:"#0a0e1a",border:"1px solid #1F2937",borderRadius:8,padding:"5px 10px",color:"#d1fae5",fontSize:12,outline:"none"}}/>
+                <button onClick={()=>removeExtra(k,i)} style={{background:"none",border:"none",color:"#374151",cursor:"pointer",fontSize:14,padding:0}}>×</button>
+              </div>
+            ))}
+            {meal.dessert!==undefined&&(
+              <div style={{display:"flex",gap:4,marginBottom:4}}>
+                <div style={{width:3,background:"#F59E0B44",borderRadius:2,flexShrink:0}}/>
+                <input value={meal.dessert||""} onChange={e=>setMeal(k,{...meal,dessert:e.target.value})} placeholder="🍰 קינוח..."
+                  style={{flex:1,background:"#0a0e1a",border:"1px solid #1F2937",borderRadius:8,padding:"5px 10px",color:"#fde68a",fontSize:12,outline:"none"}}/>
+                {meal.dessert&&<button onClick={()=>setMeal(k,{...meal,dessert:""})} style={{background:"none",border:"none",color:"#374151",cursor:"pointer",fontSize:14,padding:0}}>×</button>}
+              </div>
+            )}
+            <div style={{display:"flex",gap:6,marginTop:6}}>
+              <button onClick={()=>addExtra(k)} style={{background:"#10B98111",border:"1px solid #10B98133",borderRadius:8,padding:"3px 10px",color:"#10B981",cursor:"pointer",fontSize:11}}>+ תוספת</button>
+              {!meal.dessert&&<button onClick={()=>setMeal(k,{...meal,dessert:""})} style={{background:"#F59E0B11",border:"1px solid #F59E0B33",borderRadius:8,padding:"3px 10px",color:"#F59E0B",cursor:"pointer",fontSize:11}}>+ קינוח</button>}
+            </div>
+          </div>
+        );
+      })}
+      <div style={{borderTop:"1px solid #1F2937",paddingTop:12,marginTop:4}}>
+        <div style={{fontSize:12,color:"#6B7280",marginBottom:8}}>📋 תבניות</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:8}}>
+          {templates.map(t=>(
+            <div key={t.id} style={{background:"#1F2937",borderRadius:8,padding:"4px 12px",fontSize:12,color:"#D1D5DB",display:"flex",alignItems:"center",gap:6}}>
+              {t.name}<button onClick={()=>onUpdateTpl(templates.filter(x=>x.id!==t.id))} style={{background:"none",border:"none",color:"#4B5563",cursor:"pointer",fontSize:12,padding:0}}>×</button>
+            </div>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          <input value={newTpl} onChange={e=>setNewTpl(e.target.value)} placeholder="+ תבנית חדשה..." style={{flex:1,background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"6px 12px",color:"#f1f5f9",fontSize:12,outline:"none"}}/>
+          <button onClick={()=>{if(newTpl.trim()){onUpdateTpl([...templates,{id:gid(),name:newTpl.trim()}]);setNewTpl("");}}} style={{background:"#10B981",border:"none",borderRadius:10,padding:"6px 14px",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700}}>+</button>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function WorkoutPanel({data,onUpdate,wardrobeM,wardrobeH,onClose}) {
+  const d=data||{couple:false,moshe:{active:false,type:"",time:"",gear:{}},hana:{active:false,type:"",time:"",gear:{}}};
+  const set=(p,k,v)=>onUpdate({...d,[p]:{...d[p],[k]:v}});
+  const P=[
+    {key:"moshe",label:"🏋️ משה",color:"#7C3AED",ward:wardrobeM,gearCats:["חולצות","מכנסיים","גרביים","נעליים"]},
+    {key:"hana", label:"🏃 חנה", color:"#DB2777",ward:wardrobeH,gearCats:["חולצות","מכנסיים","גרביים","נעליים","חזיות"]},
+  ];
+  return (
+    <Panel title="🏋️ אימונים" color="#F97316" onClose={onClose}>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14,padding:"12px 14px",background:"#F9731611",borderRadius:12}}>
+        <Tog value={d.couple} onChange={v=>onUpdate({...d,couple:v})} color="#F97316"/>
+        <span style={{fontSize:14,fontWeight:600,color:d.couple?"#F97316":"#6B7280"}}>🤝 אימון זוגי</span>
+      </div>
+      {(d.couple?[P[0]]:P).map(({key,label,color,ward,gearCats})=>(
+        <div key={key} style={{marginBottom:14,padding:12,background:"#111827",borderRadius:14}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+            <Tog value={d[key].active} onChange={v=>set(key,"active",v)} color={color}/>
+            <span style={{fontSize:14,fontWeight:700,color}}>{d.couple?"🤝 אימון זוגי":label}</span>
+          </div>
+          {d[key].active&&(
+            <>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+                {WORKOUT_TYPES.map(t=><Chip key={t} label={t} active={d[key].type===t} color={color} onClick={()=>set(key,"type",t)}/>)}
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+                <span style={{fontSize:12,color:"#9CA3AF"}}>⏰</span>
+                <input type="time" value={d[key].time||""} onChange={e=>set(key,"time",e.target.value)} style={{background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"6px 10px",color:"#f1f5f9",fontSize:13,outline:"none"}}/>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                {gearCats.map(cat=>(
+                  <div key={cat}>
+                    <div style={{fontSize:10,color:"#4B5563",marginBottom:3}}>{cat}</div>
+                    <select value={d[key].gear?.[cat]||""} onChange={e=>set(key,"gear",{...d[key].gear,[cat]:e.target.value})} style={{width:"100%",background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:8,padding:"4px 8px",color:"#f1f5f9",fontSize:11,outline:"none"}}>
+                      <option value="">—</option>{(ward[cat]||[]).map((o,i)=><option key={i} value={o}>{o}</option>)}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      ))}
+    </Panel>
+  );
+}
+
+function TasksPanel({mT,hT,recM,recH,onMT,onHT,onRM,onRH,names,onClose}) {
+  const [tab,setTab]=useState("moshe");
+  const items=tab==="moshe"?[...(recM||[]).map(i=>({...i,_rec:true})),...(mT||[])]: [...(recH||[]).map(i=>({...i,_rec:true})),...(hT||[])];
+  const done=items.filter(t=>t.done).length;
+  const tog=(id,isRec)=>{ if(tab==="moshe"){isRec?onRM((recM||[]).map(x=>x.id===id?{...x,done:!x.done}:x)):onMT((mT||[]).map(x=>x.id===id?{...x,done:!x.done}:x));} else{isRec?onRH((recH||[]).map(x=>x.id===id?{...x,done:!x.done}:x)):onHT((hT||[]).map(x=>x.id===id?{...x,done:!x.done}:x));} };
+  const del=(id,isRec)=>{ if(tab==="moshe"){isRec?onRM((recM||[]).filter(x=>x.id!==id)):onMT((mT||[]).filter(x=>x.id!==id));} else{isRec?onRH((recH||[]).filter(x=>x.id!==id)):onHT((hT||[]).filter(x=>x.id!==id));} };
+  return (
+    <Panel title="✅ משימות" color="#6B7280" onClose={onClose}>
+      <div style={{display:"flex",gap:8,marginBottom:14}}>
+        <Chip label={`💜 ${names.A}`} active={tab==="moshe"} color="#7C3AED" onClick={()=>setTab("moshe")}/>
+        <Chip label={`🩷 ${names.B}`} active={tab==="hana"} color="#DB2777" onClick={()=>setTab("hana")}/>
+        <span style={{marginRight:"auto",fontSize:12,color:"#6B7280",alignSelf:"center"}}>{done}/{items.length}</span>
+      </div>
+      {items.map(t=><CR key={t.id} text={t.text} done={t.done} auto={t.auto} time={t.time} color={tab==="moshe"?"#7C3AED":"#DB2777"} onToggle={()=>tog(t.id,t._rec)} onDelete={()=>del(t.id,t._rec)}/>)}
+      <AddRow placeholder={`+ משימה ל${tab==="moshe"?names.A:names.B}...`}
+        onAdd={v=>tab==="moshe"?onMT([...(mT||[]),{id:gid(),text:v,done:false}]):onHT([...(hT||[]),{id:gid(),text:v,done:false}])}
+        onAddRec={v=>tab==="moshe"?onRM([...(recM||[]),{id:gid(),text:v,done:false}]):onRH([...(recH||[]),{id:gid(),text:v,done:false}])}/>
+    </Panel>
+  );
+}
+
+function CleaningPanel({data,allWeekData,selectedDate,onUpdate,recurring,onUpdateRec,onClose}) {
+  const d=data||{scheduled:false,couple:false,items:[]};
+  const rec=recurring||[];
+  const wk=weekOf(selectedDate);
+  const otherDay=wk.find(dk=>dk!==selectedDate&&allWeekData[dk]?.cleaning?.scheduled);
+  const allItems=[...rec.map(i=>({...i,_rec:true})),...(d.items||[])];
+  return (
+    <Panel title="🧹 ניקיון שבועי" color="#EAB308" onClose={onClose}>
+      {otherDay&&!d.scheduled&&<div style={{background:"#EAB30811",borderRadius:12,padding:12,marginBottom:12,fontSize:13,color:"#FCD34D"}}>📅 ניקיון מתוכנן ליום {DAYS_HE[dowOf(otherDay)]}</div>}
+      <div style={{display:"flex",gap:12,marginBottom:14}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",background:"#EAB30811",borderRadius:12}}>
+          <Tog value={d.scheduled} onChange={v=>onUpdate({...d,scheduled:v})} color="#EAB308"/>
+          <span style={{fontSize:13,color:d.scheduled?"#EAB308":"#6B7280"}}>ביום זה</span>
+        </div>
+        {d.scheduled&&<div style={{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",background:"#EAB30811",borderRadius:12}}>
+          <Tog value={d.couple} onChange={v=>onUpdate({...d,couple:v})} color="#EAB308"/>
+          <span style={{fontSize:13,color:d.couple?"#EAB308":"#6B7280"}}>👫 ביחד</span>
+        </div>}
+      </div>
+      {d.scheduled&&(
+        <>
+          {allItems.map(i=><CR key={i.id} text={i.text} done={i.done} color="#EAB308" onToggle={()=>i._rec?onUpdateRec(rec.map(x=>x.id===i.id?{...x,done:!x.done}:x)):onUpdate({...d,items:(d.items||[]).map(x=>x.id===i.id?{...x,done:!x.done}:x)})} onDelete={()=>i._rec?onUpdateRec(rec.filter(x=>x.id!==i.id)):onUpdate({...d,items:(d.items||[]).filter(x=>x.id!==i.id)})}/>)}
+          <AddRow placeholder="+ משימת ניקיון..." onAdd={v=>onUpdate({...d,items:[...(d.items||[]),{id:gid(),text:v,done:false}]})} onAddRec={v=>onUpdateRec([...rec,{id:gid(),text:v,done:false}])}/>
+        </>
+      )}
+    </Panel>
+  );
+}
+
+function ShoppingPanel({data,onUpdate,recurring,onUpdateRec,usageData,onUpdateUsage,onClose}) {
+  const d=data||{scheduled:false,couple:false,items:[]};
+  const rec=recurring||[];
+  const [newP,setNewP]=useState(""),newF=useRef(2);
+  const allItems=[...rec.map(i=>({...i,_rec:true})),...(d.items||[])];
+  const now = Date.now();
+  const suggestions=Object.entries(usageData||{}).filter(([,v])=>{
+    if(!v.lastBought) return true;
+    const daysSince=(now-v.lastBought)/864e5;
+    return daysSince>=v.freqWeeks*7;
+  }).map(([k,v])=>({name:k,...v}));
+  return (
+    <Panel title="🛒 קניות" color="#06B6D4" onClose={onClose}>
+      <div style={{display:"flex",gap:10,marginBottom:14}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",background:"#06B6D411",borderRadius:12}}>
+          <Tog value={d.scheduled} onChange={v=>onUpdate({...d,scheduled:v})} color="#06B6D4"/>
+          <span style={{fontSize:13,color:d.scheduled?"#06B6D4":"#6B7280"}}>קניות היום</span>
+        </div>
+        {d.scheduled&&<div style={{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",background:"#06B6D411",borderRadius:12}}>
+          <Tog value={d.couple} onChange={v=>onUpdate({...d,couple:v})} color="#06B6D4"/>
+          <span style={{fontSize:13,color:d.couple?"#06B6D4":"#6B7280"}}>👫 ביחד</span>
+        </div>}
+      </div>
+      {suggestions.length>0&&(
+        <div style={{background:"#06B6D411",borderRadius:12,padding:12,marginBottom:12}}>
+          <div style={{fontSize:12,color:"#06B6D4",fontWeight:700,marginBottom:8}}>💡 הגיע הזמן לקנות:</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+            {suggestions.map(s=><button key={s.name} onClick={()=>onUpdate({...d,items:[...(d.items||[]),{id:gid(),text:s.name,done:false}]})}
+              style={{background:"#06B6D422",border:"1px solid #06B6D444",borderRadius:10,padding:"4px 12px",color:"#06B6D4",cursor:"pointer",fontSize:12}}>+ {s.name}</button>)}
+          </div>
+        </div>
+      )}
+      {allItems.map(i=><CR key={i.id} text={i.text} done={i.done} color="#06B6D4"
+        onToggle={()=>i._rec?onUpdateRec(rec.map(x=>x.id===i.id?{...x,done:!x.done}:x)):onUpdate({...d,items:(d.items||[]).map(x=>x.id===i.id?{...x,done:!x.done}:x)})}
+        onDelete={()=>i._rec?onUpdateRec(rec.filter(x=>x.id!==i.id)):onUpdate({...d,items:(d.items||[]).filter(x=>x.id!==i.id)})}/>)}
+      <AddRow placeholder="+ מוצר..." onAdd={v=>onUpdate({...d,items:[...(d.items||[]),{id:gid(),text:v,done:false}]})} onAddRec={v=>onUpdateRec([...rec,{id:gid(),text:v,done:false}])}/>
+      <div style={{borderTop:"1px solid #1F2937",paddingTop:12,marginTop:12}}>
+        <div style={{fontSize:12,color:"#6B7280",marginBottom:8}}>📊 מוצרים חוזרים</div>
+        {Object.entries(usageData||{}).map(([k,v])=>(
+          <div key={k} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,padding:"6px 10px",background:"#0a0e1a",borderRadius:10}}>
+            <span style={{flex:1,fontSize:12}}>{k}</span>
+            <span style={{fontSize:11,color:"#6B7280"}}>כל {v.freqWeeks} שב׳</span>
+            <button onClick={()=>onUpdateUsage({...usageData,[k]:{...v,lastBought:Date.now()}})} style={{background:"#10B981",border:"none",borderRadius:8,padding:"3px 10px",color:"#fff",cursor:"pointer",fontSize:11,fontWeight:700}}>קניתי ✓</button>
+            <button onClick={()=>{const u={...usageData};delete u[k];onUpdateUsage(u);}} style={{background:"none",border:"none",color:"#374151",cursor:"pointer",fontSize:14,padding:0}}>×</button>
+          </div>
+        ))}
+        <div style={{display:"flex",gap:6,marginTop:8}}>
+          <input value={newP} onChange={e=>setNewP(e.target.value)} placeholder="מוצר חוזר..." style={{flex:1,background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"6px 12px",color:"#f1f5f9",fontSize:12,outline:"none"}}/>
+          <input type="number" min={1} max={12} defaultValue={2} onChange={e=>newF.current=Number(e.target.value)} style={{width:48,background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"6px",color:"#f1f5f9",fontSize:12,textAlign:"center",outline:"none"}}/>
+          <span style={{fontSize:11,color:"#6B7280",alignSelf:"center"}}>שב׳</span>
+          <button onClick={()=>{if(newP.trim()){onUpdateUsage({...usageData,[newP.trim()]:{freqWeeks:newF.current,lastBought:0}});setNewP("");}}} style={{background:"#06B6D4",border:"none",borderRadius:10,padding:"6px 12px",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700}}>+</button>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function WinnerPanel({data, onUpdate, who, name, onClose}) {
+  const [editMode,setEditMode]=useState(false);
+  const [editChecks,setEditChecks]=useState(false);
+  const timerRef=useRef(null);
+  const DEFAULT_Q = who==="moshe"?[
+    {id:"q1",prompt:"📅 3 דברים שקרו לי / עשיתי היום:",type:"text3"},
+    {id:"q2",prompt:"🙏 5 דברים שאני מכיר תודה עליהם:",type:"text5"},
+    {id:"q3",prompt:"💑 מה עשיתי לטובת הזוגיות שלי?",type:"text"},
+    {id:"q4",prompt:"👨‍👧‍👦 מה עשיתי לטובת היחסים עם הילדים?",type:"text"},
+    {id:"q5",prompt:"💼 מה עשיתי לטובת היחסים העסקיים שלי?",type:"text"},
+  ]:[
+    {id:"q1",prompt:"💖 מה היה טוב היום?",type:"text"},
+    {id:"q2",prompt:"🙏 3 דברים שאני מכירה תודה עליהם:",type:"text3"},
+    {id:"q3",prompt:"💑 מה עשיתי לטובת הזוגיות שלנו?",type:"text"},
+  ];
+  const DEFAULT_CHECKS = [
+    {id:"phoneOff",label:"📵 ניתוק טלפון"},
+    {id:"bookRead",label:"📖 קראתי (זמן אמיתי)"},
+  ];
+  const d = data || {questions:[],answers:{},checkboxes:[],alarmTime:"",bookName:"",readFrom:"",readTo:"",readTimer:0,timerRunning:false};
+  const questions = d.questions?.length ? d.questions : DEFAULT_Q;
+  const checkboxes = d.checkboxes?.length ? d.checkboxes : DEFAULT_CHECKS;
+  const set=(k,v)=>onUpdate(p=>({...(p||{}),[k]:v}));
+  const setA=(k,v)=>onUpdate(p=>({...(p||{}),answers:{...((p||{}).answers||{}),[k]:v}}));
+  const setQ=(qs)=>onUpdate(p=>({...(p||{}),questions:qs}));
+  const setChecks=(cb)=>onUpdate(p=>({...(p||{}),checkboxes:cb}));
+  const toggleCheck=(id)=>onUpdate(p=>({...(p||{}),[id]:!(p||{})[id]}));
+  
+  useEffect(()=>{
+    if(d.timerRunning){ timerRef.current=setInterval(()=>onUpdate(p=>({...(p||{}),readTimer:((p||{}).readTimer||0)+1})),1000); }
+    else clearInterval(timerRef.current);
+    return ()=>clearInterval(timerRef.current);
+  },[d.timerRunning]);
+  
+  const readTimerMin = Math.floor((d.readTimer||0)/60);
+
+  return (
+    <Panel title={`🏆 קוד המנצח – ${name}`} color="#F59E0B" onClose={onClose}>
+      <div style={{display:"flex",justifyContent:"space-between",marginBottom:14}}>
+        <div style={{fontSize:12,color:"#6B7280"}}>הטקס האישי שלך לפני שינה</div>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={()=>setEditChecks(e=>!e)} style={{background:"#1F2937",border:"none",borderRadius:10,padding:"5px 10px",color:"#9CA3AF",cursor:"pointer",fontSize:11}}>✏️ צ'קים</button>
+          <button onClick={()=>setEditMode(e=>!e)} style={{background:"#1F2937",border:"none",borderRadius:10,padding:"5px 12px",color:"#9CA3AF",cursor:"pointer",fontSize:12}}>{editMode?"✓ סיום":"✏️ שאלות"}</button>
+        </div>
+      </div>
+      {editMode?(
+        <div>
+          {questions.map((q,i)=>(
+            <div key={q.id} style={{display:"flex",gap:6,marginBottom:8,alignItems:"center"}}>
+              <input value={q.prompt} onChange={e=>{const qs=[...questions];qs[i]={...qs[i],prompt:e.target.value};setQ(qs);}} style={{flex:1,background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"6px 12px",color:"#f1f5f9",fontSize:12,outline:"none"}}/>
+              <select value={q.type} onChange={e=>{const qs=[...questions];qs[i]={...qs[i],type:e.target.value};setQ(qs);}} style={{background:"#1F2937",border:"1px solid #2d3748",borderRadius:8,padding:"5px",color:"#9CA3AF",fontSize:11,outline:"none"}}>
+                <option value="text">טקסט</option><option value="text3">3 שורות</option><option value="text5">5 שורות</option>
+              </select>
+              <button onClick={()=>setQ(questions.filter((_,j)=>j!==i))} style={{background:"none",border:"none",color:"#EF4444",cursor:"pointer",fontSize:18,padding:0}}>×</button>
+            </div>
+          ))}
+          <button onClick={()=>setQ([...questions,{id:gid(),prompt:"שאלה חדשה...",type:"text"}])} style={{background:"#F59E0B22",border:"1px dashed #F59E0B55",borderRadius:10,padding:"8px 14px",color:"#F59E0B",cursor:"pointer",fontSize:12,marginTop:4,width:"100%"}}>+ הוסף שאלה</button>
+        </div>
+      ):(
+        <>
+          {questions.map(q=>(
+            <div key={q.id} style={{marginBottom:14}}>
+              <div style={{fontSize:13,color:"#F59E0B",fontWeight:600,marginBottom:6}}>{q.prompt}</div>
+              {q.type==="text3"&&[1,2,3].map(i=><input key={i} value={d.answers?.[q.id+"_"+i]||""} onChange={e=>setA(q.id+"_"+i,e.target.value)} placeholder={`${i}.`} style={{display:"block",width:"100%",marginBottom:4,background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"7px 12px",color:"#f1f5f9",fontSize:13,boxSizing:"border-box",outline:"none"}}/>)}
+              {q.type==="text5"&&[1,2,3,4,5].map(i=><input key={i} value={d.answers?.[q.id+"_"+i]||""} onChange={e=>setA(q.id+"_"+i,e.target.value)} placeholder={`${i}.`} style={{display:"block",width:"100%",marginBottom:4,background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"7px 12px",color:"#f1f5f9",fontSize:13,boxSizing:"border-box",outline:"none"}}/>)}
+              {q.type==="text"&&<textarea value={d.answers?.[q.id]||""} onChange={e=>setA(q.id,e.target.value)} placeholder="..." style={{width:"100%",background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"8px 12px",color:"#f1f5f9",fontSize:12,minHeight:56,resize:"vertical",outline:"none",boxSizing:"border-box"}}/>}
+            </div>
+          ))}
+          <div style={{background:"#111827",borderRadius:14,padding:14,marginBottom:14}}>
+            <div style={{fontSize:13,color:"#F59E0B",fontWeight:700,marginBottom:10}}>📖 מעקב קריאה</div>
+            <input value={d.bookName||""} onChange={e=>set("bookName",e.target.value)} placeholder="שם הספר..." style={{width:"100%",marginBottom:8,background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"7px 12px",color:"#f1f5f9",fontSize:13,boxSizing:"border-box",outline:"none"}}/>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
+              <div><div style={{fontSize:10,color:"#6B7280",marginBottom:3}}>מעמוד</div><input type="number" value={d.readFrom||""} onChange={e=>set("readFrom",e.target.value)} style={{width:"100%",background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"7px 12px",color:"#f1f5f9",fontSize:13,boxSizing:"border-box",outline:"none"}}/></div>
+              <div><div style={{fontSize:10,color:"#6B7280",marginBottom:3}}>עד עמוד</div><input type="number" value={d.readTo||""} onChange={e=>set("readTo",e.target.value)} style={{width:"100%",background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"7px 12px",color:"#f1f5f9",fontSize:13,boxSizing:"border-box",outline:"none"}}/></div>
+              <div><div style={{fontSize:10,color:"#6B7280",marginBottom:3}}>עמודים</div><div style={{padding:"8px 4px",fontSize:16,color:"#10B981",fontWeight:800,textAlign:"center"}}>{d.readTo&&d.readFrom?Math.max(0,Number(d.readTo)-Number(d.readFrom)):0}</div></div>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <div style={{fontSize:20,fontWeight:800,color:"#F59E0B",fontVariantNumeric:"tabular-nums",minWidth:56}}>{fmtTimer(d.readTimer||0)}</div>
+              <button onClick={()=>set("timerRunning",!d.timerRunning)} style={{background:d.timerRunning?"#EF4444":"#10B981",border:"none",borderRadius:10,padding:"6px 14px",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700}}>{d.timerRunning?"⏸ עצור":"▶ התחל"}</button>
+              <button onClick={()=>set("readTimer",0)} style={{background:"#1F2937",border:"none",borderRadius:10,padding:"6px 12px",color:"#9CA3AF",cursor:"pointer",fontSize:13}}>↺</button>
+            </div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+            <span style={{fontSize:13,color:"#F59E0B"}}>⏰ שעון מעורר:</span>
+            <input type="time" value={d.alarmTime||""} onChange={e=>set("alarmTime",e.target.value)} style={{background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"6px 10px",color:"#f1f5f9",fontSize:14,outline:"none"}}/>
+          </div>
+          {editChecks ? (
+            <div style={{background:"#111827",borderRadius:12,padding:12,marginBottom:8}}>
+              <div style={{fontSize:12,color:"#6B7280",marginBottom:8}}>✏️ עריכת צ׳ק-בוקסים</div>
+              {checkboxes.map((cb,i)=>(
+                <div key={cb.id} style={{display:"flex",gap:6,marginBottom:6}}>
+                  <input value={cb.label} onChange={e=>{const c=[...checkboxes];c[i]={...c[i],label:e.target.value};setChecks(c);}} style={{flex:1,background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"5px 12px",color:"#f1f5f9",fontSize:12,outline:"none"}}/>
+                  <button onClick={()=>setChecks(checkboxes.filter((_,j)=>j!==i))} style={{background:"#EF444422",border:"none",borderRadius:8,padding:"4px 8px",color:"#EF4444",cursor:"pointer",fontSize:13}}>×</button>
+                </div>
+              ))}
+              <button onClick={()=>setChecks([...checkboxes,{id:gid(),label:"פעולה חדשה"}])} style={{background:"#F59E0B22",border:"1px dashed #F59E0B55",borderRadius:10,padding:"6px",color:"#F59E0B",cursor:"pointer",fontSize:12,width:"100%",marginTop:4}}>+ הוסף</button>
+            </div>
+          ):(
+            checkboxes.map(cb=>{
+              const checked = d[cb.id]||false;
+              const isReadTimer = cb.id==="bookRead";
+              const displayLabel = isReadTimer&&readTimerMin>0&&checked ? `📖 קראתי ${readTimerMin} דקות` : cb.label;
+              return (
+                <div key={cb.id} style={{display:"flex",alignItems:"center",gap:12,marginBottom:10,padding:"10px 14px",background:checked?"#F59E0B11":"#0a0e1a",borderRadius:12,transition:"background .2s"}}>
+                  <button onClick={()=>toggleCheck(cb.id)} style={{width:24,height:24,borderRadius:8,border:`2px solid ${checked?"#F59E0B":"#374151"}`,background:checked?"#F59E0B":"transparent",cursor:"pointer",color:"#fff",fontSize:13,display:"flex",alignItems:"center",justifyContent:"center"}}>{checked?"✓":""}</button>
+                  <span style={{fontSize:13,color:checked?"#F59E0B":"#D1D5DB",textDecoration:checked?"line-through":"none",fontWeight:checked?600:400}}>{displayLabel}</span>
+                </div>
+              );
+            })
+          )}
+        </>
+      )}
+    </Panel>
+  );
+}
+
+function IntimacyPanel({data, onUpdate, onClose}) {
+  const d = data || {scheduled:false, timeOfDay:"", customTime:"", cycleStart:null, cycleDays:28, mikvahPlanned:false, mikvahDate:null};
+  const set = (k,v) => onUpdate({...d,[k]:v});
+  const TODAY = todayKey();
+  const mikvahEst = d.cycleStart ? addDays(new Date(d.cycleStart).toISOString().slice(0,10), d.cycleDays) : null;
+  const isNidda = d.cycleStart && mikvahEst && TODAY < mikvahEst;
+  const TIME_OPTIONS = [
+    {id:"morning",label:"בוקר",emoji:"🌅",sub:"06:00–12:00"},
+    {id:"noon",   label:"צהריים",emoji:"☀️",sub:"12:00–16:00"},
+    {id:"evening",label:"ערב",  emoji:"🌆",sub:"16:00–21:00"},
+    {id:"night",  label:"לילה", emoji:"🌙",sub:"21:00+"},
+    {id:"custom", label:"שעה מדויקת",emoji:"⏰",sub:""},
+  ];
+  return (
+    <Panel title="💕 דייט מיני" color="#EC4899" onClose={onClose}>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16,padding:"14px 16px",background:"#EC489911",borderRadius:14,border:"1px solid #EC489933"}}>
+        <Tog value={d.scheduled} onChange={v=>set("scheduled",v)} color="#EC4899" size={24}/>
+        <div>
+          <div style={{fontSize:15,fontWeight:700,color:d.scheduled?"#EC4899":"#6B7280"}}>מתוכנן היום 💕</div>
+          {d.scheduled&&!isNidda&&<div style={{fontSize:11,color:"#9CA3AF"}}>בחר שעה מתאימה למטה</div>}
+        </div>
+      </div>
+      {isNidda&&<div style={{background:"#EF444422",borderRadius:14,padding:"14px 16px",marginBottom:16,border:"1px solid #EF444444",display:"flex",alignItems:"center",gap:12}}><span style={{fontSize:28}}>🚫</span><div><div style={{fontSize:13,color:"#FCA5A5",fontWeight:700}}>נידה פעילה</div><div style={{fontSize:12,color:"#FCA5A5"}}>עד {fmtDate(mikvahEst)}</div></div></div>}
+      {d.scheduled&&!isNidda&&(
+        <div style={{marginBottom:16}}>
+          <div style={{fontSize:12,color:"#9CA3AF",fontWeight:700,marginBottom:10}}>⏰ מתי?</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+            {TIME_OPTIONS.map(opt=>(
+              <button key={opt.id} onClick={()=>set("timeOfDay",opt.id)} style={{padding:"12px 14px",borderRadius:14,border:`2px solid ${d.timeOfDay===opt.id?"#EC4899":"#EC489933"}`,background:d.timeOfDay===opt.id?"#EC489922":"transparent",cursor:"pointer",textAlign:"right",transition:"all .15s",gridColumn:opt.id==="custom"?"1/-1":"auto"}}>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <span style={{fontSize:20}}>{opt.emoji}</span>
+                  <div><div style={{fontSize:13,fontWeight:700,color:d.timeOfDay===opt.id?"#EC4899":"#D1D5DB"}}>{opt.label}</div>{opt.sub&&<div style={{fontSize:10,color:"#6B7280"}}>{opt.sub}</div>}</div>
+                  {d.timeOfDay===opt.id&&<span style={{marginRight:"auto",color:"#EC4899"}}>✓</span>}
+                </div>
+                {opt.id==="custom"&&d.timeOfDay==="custom"&&<input type="time" value={d.customTime||""} onClick={e=>e.stopPropagation()} onChange={e=>set("customTime",e.target.value)} style={{marginTop:8,background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"6px 10px",color:"#f1f5f9",fontSize:14,outline:"none",width:"100%",boxSizing:"border-box"}}/>}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      <div style={{background:"#EC489911",borderRadius:16,padding:16,border:"1px solid #EC489922"}}>
+        <div style={{fontSize:14,color:"#EC4899",fontWeight:800,marginBottom:14}}>🌸 מחזור ומקווה</div>
+        <button onClick={()=>set("cycleStart",Date.now())} style={{width:"100%",background:"#EC489922",border:"2px dashed #EC489966",borderRadius:14,padding:"12px",color:"#EC4899",cursor:"pointer",fontWeight:700,fontSize:14,marginBottom:12}}>🩸 התחיל וסת היום</button>
+        {d.cycleStart&&(
+          <div style={{background:"#0a0e1a",borderRadius:12,padding:12,marginBottom:12}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+              <span style={{fontSize:12,color:"#9CA3AF",flexShrink:0}}>ימי נידה:</span>
+              <input type="number" min={14} max={45} value={d.cycleDays} onChange={e=>set("cycleDays",Number(e.target.value))} style={{width:60,background:"#111827",border:"1px solid #2d3748",borderRadius:10,padding:"5px 8px",color:"#f1f5f9",fontSize:13,textAlign:"center",outline:"none"}}/>
+              <button onClick={()=>set("cycleStart",null)} style={{marginRight:"auto",background:"#1F2937",border:"none",borderRadius:8,padding:"4px 10px",color:"#6B7280",cursor:"pointer",fontSize:12}}>↺ איפוס</button>
+            </div>
+            {mikvahEst&&<div style={{padding:"8px 12px",borderRadius:10,background:isNidda?"#EF444411":"#10B98111",border:`1px solid ${isNidda?"#EF444433":"#10B98133"}`,fontSize:13,fontWeight:700,color:isNidda?"#EF4444":"#10B981"}}>{isNidda?`🚫 נידה עד ${fmtDate(mikvahEst)}`:`✅ מקווה עבר: ${fmtDate(mikvahEst)}`}</div>}
+          </div>
+        )}
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:d.mikvahPlanned?10:0}}>
+          <Tog value={d.mikvahPlanned} onChange={v=>set("mikvahPlanned",v)} color="#10B981"/>
+          <span style={{fontSize:13,color:d.mikvahPlanned?"#10B981":"#6B7280",fontWeight:600}}>💧 ערב מקווה מתוכנן</span>
+        </div>
+        {d.mikvahPlanned&&<Inp type="date" value={d.mikvahDate||""} onChange={v=>set("mikvahDate",v)}/>}
+      </div>
+    </Panel>
+  );
+}
+
+function DateNightPanel({data,onUpdate,onClose}) {
+  const d=data||{scheduled:false,day:"",time:"",place:"",budget:""};
+  return (
+    <Panel title="☕ דייט זוגי" color="#FF6B9D" onClose={onClose}>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14,padding:"12px 14px",background:"#FF6B9D11",borderRadius:12}}>
+        <Tog value={d.scheduled} onChange={v=>onUpdate({...d,scheduled:v})} color="#FF6B9D"/>
+        <span style={{fontSize:14,fontWeight:600,color:d.scheduled?"#FF6B9D":"#6B7280"}}>מתוכנן השבוע 💕</span>
+      </div>
+      {d.scheduled&&(
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <div><div style={{fontSize:11,color:"#6B7280",marginBottom:4}}>📅 יום</div>
+            <select value={d.day} onChange={e=>onUpdate({...d,day:e.target.value})} style={{width:"100%",background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"7px 12px",color:"#f1f5f9",fontSize:13,outline:"none"}}>
+              <option value="">בחר...</option>{DAYS_HE.map(day=><option key={day} value={day}>{day}</option>)}
+            </select></div>
+          <div><div style={{fontSize:11,color:"#6B7280",marginBottom:4}}>⏰ שעה</div><Inp type="time" value={d.time} onChange={v=>onUpdate({...d,time:v})}/></div>
+          <div><div style={{fontSize:11,color:"#6B7280",marginBottom:4}}>☕ מקום</div><Inp value={d.place} onChange={v=>onUpdate({...d,place:v})} placeholder="שם בית הקפה..."/></div>
+          <div><div style={{fontSize:11,color:"#6B7280",marginBottom:4}}>💰 תקציב ₪</div><Inp type="number" value={d.budget} onChange={v=>onUpdate({...d,budget:v})} placeholder="סכום..."/></div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function DebtPanel({data, onUpdate, names, onClose}) {
+  const d = data||{debts:[],payments:[]};
+  const [showAddDebt,setShowAddDebt]=useState(false);
+  const [newDebt,setNewDebt]=useState({name:"",amount:"",creditor:""});
+  const [showAddPay,setShowAddPay]=useState(false);
+  const [newPay,setNewPay]=useState({date:todayKey(),amountA:"",amountB:"",note:""});
+  const totalDebt = (d.debts||[]).filter(x=>x.active!==false).reduce((s,x)=>s+Number(x.amount||0),0);
+  const totalPaid = (d.payments||[]).reduce((s,p)=>s+Number(p.amountA||0)+Number(p.amountB||0),0);
+  const paidA = (d.payments||[]).reduce((s,p)=>s+Number(p.amountA||0),0);
+  const paidB = (d.payments||[]).reduce((s,p)=>s+Number(p.amountB||0),0);
+  const remaining = Math.max(0,totalDebt-totalPaid);
+  const progress = totalDebt>0?Math.min(100,(totalPaid/totalDebt)*100):0;
+  
+  const addDebt=()=>{if(!newDebt.name||!newDebt.amount)return;onUpdate({...d,debts:[...(d.debts||[]),{id:gid(),...newDebt,amount:Number(newDebt.amount),active:true}]});setNewDebt({name:"",amount:"",creditor:""});setShowAddDebt(false);};
+  const removeDebt=(id)=>onUpdate({...d,debts:(d.debts||[]).filter(x=>x.id!==id)});
+  const toggleDebt=(id)=>onUpdate({...d,debts:(d.debts||[]).map(x=>x.id===id?{...x,active:!x.active}:x)});
+  const editDebt=(id,patch)=>onUpdate({...d,debts:(d.debts||[]).map(x=>x.id===id?{...x,...patch}:x)});
+  
+  const addPayment=()=>{if(!newPay.amountA&&!newPay.amountB)return;onUpdate({...d,payments:[...(d.payments||[]),{id:gid(),...newPay}]});setNewPay({date:todayKey(),amountA:"",amountB:"",note:""});setShowAddPay(false);};
+  const removePayment=(id)=>onUpdate({...d,payments:(d.payments||[]).filter(x=>x.id!==id)});
+  
+  return (
+    <Panel title="💰 ניהול חובות" color="#F59E0B" onClose={onClose}>
+      <div style={{background:"linear-gradient(135deg,#F59E0B22,#EF444422)",borderRadius:16,padding:16,marginBottom:16,border:"1px solid #F59E0B33"}}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+          <div><div style={{fontSize:10,color:"#9CA3AF"}}>יעד כולל</div><div style={{fontSize:24,fontWeight:900,color:"#F59E0B"}}>{totalDebt.toLocaleString()} ₪</div></div>
+          <div style={{textAlign:"left"}}><div style={{fontSize:10,color:"#9CA3AF"}}>נותר</div><div style={{fontSize:24,fontWeight:900,color:remaining===0?"#10B981":"#EF4444"}}>{remaining.toLocaleString()} ₪</div></div>
+        </div>
+        <div style={{height:10,borderRadius:10,background:"#1F2937",overflow:"hidden",marginBottom:8}}><div style={{height:"100%",width:`${progress}%`,background:"linear-gradient(90deg,#10B981,#F59E0B)",borderRadius:10,transition:"width .5s"}}/></div>
+        <div style={{fontSize:11,color:"#9CA3AF",textAlign:"center"}}>{progress.toFixed(1)}% שולם</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:10}}>
+          <div style={{background:"#7C3AED22",borderRadius:10,padding:"8px 12px",border:"1px solid #7C3AED33"}}><div style={{fontSize:11,color:"#7C3AED",fontWeight:700}}>💜 {names.A}</div><div style={{fontSize:16,fontWeight:800,color:"#7C3AED"}}>{paidA.toLocaleString()} ₪</div></div>
+          <div style={{background:"#DB277722",borderRadius:10,padding:"8px 12px",border:"1px solid #DB277733"}}><div style={{fontSize:11,color:"#DB2777",fontWeight:700}}>🩷 {names.B}</div><div style={{fontSize:16,fontWeight:800,color:"#DB2777"}}>{paidB.toLocaleString()} ₪</div></div>
+        </div>
+      </div>
+      <div style={{marginBottom:14}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <div style={{fontSize:13,color:"#F59E0B",fontWeight:700}}>📋 רשימת חובות</div>
+          <button onClick={()=>setShowAddDebt(s=>!s)} style={{background:"#F59E0B22",border:"1px solid #F59E0B44",borderRadius:10,padding:"4px 12px",color:"#F59E0B",cursor:"pointer",fontSize:12}}>+ הוסף</button>
+        </div>
+        {showAddDebt&&(
+          <div style={{background:"#111827",borderRadius:14,padding:14,marginBottom:10,border:"1px solid #F59E0B33"}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+              <div><div style={{fontSize:10,color:"#6B7280",marginBottom:3}}>שם החוב</div><Inp value={newDebt.name} onChange={v=>setNewDebt(p=>({...p,name:v}))} placeholder="כרטיס אשראי..."/></div>
+              <div><div style={{fontSize:10,color:"#6B7280",marginBottom:3}}>סכום ₪</div><Inp type="number" value={newDebt.amount} onChange={v=>setNewDebt(p=>({...p,amount:v}))} placeholder="0"/></div>
+              <div style={{gridColumn:"1/-1"}}><div style={{fontSize:10,color:"#6B7280",marginBottom:3}}>נושה</div><Inp value={newDebt.creditor} onChange={v=>setNewDebt(p=>({...p,creditor:v}))} placeholder="שם הנושה (אופציונלי)"/></div>
+            </div>
+            <div style={{display:"flex",gap:8}}><button onClick={addDebt} style={{flex:1,background:"#F59E0B",border:"none",borderRadius:10,padding:"8px",color:"#000",cursor:"pointer",fontWeight:700,fontSize:13}}>✓ הוסף</button><button onClick={()=>setShowAddDebt(false)} style={{background:"#1F2937",border:"none",borderRadius:10,padding:"8px 14px",color:"#6B7280",cursor:"pointer",fontSize:13}}>ביטול</button></div>
+          </div>
+        )}
+        {(d.debts||[]).map(debt=>(
+          <div key={debt.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",marginBottom:6,background:"#111827",borderRadius:12,border:`1px solid ${debt.active!==false?"#F59E0B33":"#1F2937"}`}}>
+            <Tog value={debt.active!==false} onChange={()=>toggleDebt(debt.id)} color="#F59E0B" size={18}/>
+            <div style={{flex:1}}>
+              <input value={debt.name} onChange={e=>editDebt(debt.id,{name:e.target.value})} style={{background:"transparent",border:"none",color:debt.active!==false?"#f1f5f9":"#4B5563",fontSize:13,fontWeight:700,outline:"none",width:"100%"}}/>
+              <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <input type="number" value={debt.amount} onChange={e=>editDebt(debt.id,{amount:Number(e.target.value)})} style={{background:"transparent",border:"none",color:"#6B7280",fontSize:11,outline:"none",width:80}}/>
+                <span style={{fontSize:11,color:"#6B7280"}}>₪{debt.creditor?` • ${debt.creditor}`:""}</span>
+              </div>
+            </div>
+            <button onClick={()=>removeDebt(debt.id)} style={{background:"#EF444422",border:"none",borderRadius:8,padding:"4px 8px",color:"#EF4444",cursor:"pointer",fontSize:12}}>מחק</button>
+          </div>
+        ))}
+      </div>
+      <div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <div style={{fontSize:13,color:"#10B981",fontWeight:700}}>✅ תשלומים</div>
+          <button onClick={()=>setShowAddPay(s=>!s)} style={{background:"#10B98122",border:"1px solid #10B98144",borderRadius:10,padding:"4px 12px",color:"#10B981",cursor:"pointer",fontSize:12}}>+ תשלום</button>
+        </div>
+        {showAddPay&&(
+          <div style={{background:"#111827",borderRadius:14,padding:14,marginBottom:10,border:"1px solid #10B98133"}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+              <div><div style={{fontSize:10,color:"#6B7280",marginBottom:3}}>📅 תאריך</div><Inp type="date" value={newPay.date} onChange={v=>setNewPay(p=>({...p,date:v}))}/></div>
+              <div><div style={{fontSize:10,color:"#6B7280",marginBottom:3}}>💜 {names.A} ₪</div><Inp type="number" value={newPay.amountA} onChange={v=>setNewPay(p=>({...p,amountA:v}))} placeholder="0"/></div>
+              <div><div style={{fontSize:10,color:"#6B7280",marginBottom:3}}>🩷 {names.B} ₪</div><Inp type="number" value={newPay.amountB} onChange={v=>setNewPay(p=>({...p,amountB:v}))} placeholder="0"/></div>
+              <div><div style={{fontSize:10,color:"#6B7280",marginBottom:3}}>📝 הערה</div><Inp value={newPay.note} onChange={v=>setNewPay(p=>({...p,note:v}))} placeholder="אופציונלי"/></div>
+            </div>
+            <div style={{display:"flex",gap:8}}><button onClick={addPayment} style={{flex:1,background:"#10B981",border:"none",borderRadius:10,padding:"8px",color:"#fff",cursor:"pointer",fontWeight:700,fontSize:13}}>✓ רשום</button><button onClick={()=>setShowAddPay(false)} style={{background:"#1F2937",border:"none",borderRadius:10,padding:"8px 14px",color:"#6B7280",cursor:"pointer",fontSize:13}}>ביטול</button></div>
+          </div>
+        )}
+        <div style={{maxHeight:220,overflow:"auto"}}>
+          {[...(d.payments||[])].reverse().map(p=>(
+            <div key={p.id} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",marginBottom:4,background:"#111827",borderRadius:10}}>
+              <div style={{flex:1}}><div style={{fontSize:12,color:"#f1f5f9",fontWeight:600}}>{fmtDate(p.date)}{p.note&&` • ${p.note}`}</div><div style={{fontSize:11,color:"#6B7280"}}>{p.amountA?<span style={{color:"#7C3AED"}}>💜{Number(p.amountA).toLocaleString()}₪ </span>:null}{p.amountB?<span style={{color:"#DB2777"}}>🩷{Number(p.amountB).toLocaleString()}₪</span>:null}</div></div>
+              <div style={{fontSize:13,fontWeight:700,color:"#10B981"}}>{(Number(p.amountA||0)+Number(p.amountB||0)).toLocaleString()}₪</div>
+              <button onClick={()=>removePayment(p.id)} style={{background:"none",border:"none",color:"#374151",cursor:"pointer",fontSize:14,padding:0}}>×</button>
+            </div>
+          ))}
+          {!(d.payments||[]).length&&<div style={{fontSize:13,color:"#4B5563",textAlign:"center",padding:"16px 0"}}>עדיין לא נרשמו תשלומים</div>}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function ZoomPanel({data, onUpdate, onClose}) {
+  const d = data || {attended:false, notes:"", topics:""};
+  return (
+    <Panel title="💻 שיעור Zoom – יום חמישי" color="#818CF8" onClose={onClose}>
+      <div style={{background:"#818CF811",borderRadius:14,padding:14,marginBottom:14,border:"1px solid #818CF833"}}>
+        <div style={{fontSize:13,color:"#818CF8",fontWeight:700,marginBottom:4}}>📅 כל יום חמישי | 19:00–22:00</div>
+        <div style={{fontSize:12,color:"#9CA3AF"}}>שיעור קבוע בזום</div>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14,padding:"12px 14px",background:d.attended?"#10B98111":"#0a0e1a",borderRadius:12}}>
+        <Tog value={d.attended} onChange={v=>onUpdate({...d,attended:v})} color="#10B981"/>
+        <span style={{fontSize:14,fontWeight:600,color:d.attended?"#10B981":"#6B7280"}}>✅ השתתפתי היום</span>
+      </div>
+      <div style={{marginBottom:10}}><div style={{fontSize:12,color:"#6B7280",marginBottom:4}}>📚 נושאים שנלמדו</div><textarea value={d.topics||""} onChange={e=>onUpdate({...d,topics:e.target.value})} placeholder="מה למדתי היום..." style={{width:"100%",background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"8px 12px",color:"#f1f5f9",fontSize:12,minHeight:70,resize:"vertical",outline:"none",boxSizing:"border-box"}}/></div>
+      <div><div style={{fontSize:12,color:"#6B7280",marginBottom:4}}>📝 הערות</div><textarea value={d.notes||""} onChange={e=>onUpdate({...d,notes:e.target.value})} placeholder="הערות חופשיות..." style={{width:"100%",background:"#0a0e1a",border:"1px solid #2d3748",borderRadius:10,padding:"8px 12px",color:"#f1f5f9",fontSize:12,minHeight:56,resize:"vertical",outline:"none",boxSizing:"border-box"}}/></div>
+    </Panel>
+  );
+}
+
+function ViewBar({mode, onMode, selDate, onDate}) {
+  const TODAY = todayKey();
+  const wk = weekOf(selDate);
+  const mo = monthOf(selDate);
+  const d = new Date(selDate+"T12:00:00");
+  const monthLabel = `${MONTHS_HE[d.getMonth()]} ${d.getFullYear()}`;
+  const prevPeriod=()=>{ if(mode==="day") onDate(addDays(selDate,-1)); else if(mode==="week") onDate(addDays(selDate,-7)); else onDate(addDays(selDate,-30)); };
+  const nextPeriod=()=>{ if(mode==="day") onDate(addDays(selDate,1)); else if(mode==="week") onDate(addDays(selDate,7)); else onDate(addDays(selDate,30)); };
+  return (
+    <div style={{padding:"8px 0 4px"}}>
+      <div style={{display:"flex",gap:4,marginBottom:10}}>
+        {[["day","יום"],["week","שבוע"],["month","חודש"]].map(([m,l])=>(
+          <button key={m} onClick={()=>onMode(m)} style={{flex:1,padding:"6px 0",borderRadius:10,border:`1.5px solid ${mode===m?"#7C3AED":"#1F2937"}`,background:mode===m?"#7C3AED":"transparent",color:mode===m?"#fff":"#6B7280",cursor:"pointer",fontSize:12,fontWeight:mode===m?700:400,transition:"all .15s"}}>{l}</button>
+        ))}
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
+        <button onClick={prevPeriod} style={{background:"#1F2937",border:"none",borderRadius:8,padding:"5px 10px",color:"#9CA3AF",cursor:"pointer",fontSize:14}}>‹</button>
+        <div style={{flex:1,textAlign:"center",fontSize:12,color:"#9CA3AF",fontWeight:600}}>
+          {mode==="day"?`${DAYS_HE[dowOf(selDate)]} ${fmtDate(selDate)}`:mode==="week"?`${fmtDate(wk[0])} – ${fmtDate(wk[6])}`:monthLabel}
+        </div>
+        <button onClick={nextPeriod} style={{background:"#1F2937",border:"none",borderRadius:8,padding:"5px 10px",color:"#9CA3AF",cursor:"pointer",fontSize:14}}>›</button>
+        <button onClick={()=>onDate(TODAY)} style={{background:"#4338CA",border:"none",borderRadius:8,padding:"5px 10px",color:"#C7D2FE",cursor:"pointer",fontSize:11,fontWeight:700}}>היום</button>
+      </div>
+      {(mode==="day"||mode==="week")&&(
+        <div style={{display:"flex",gap:4,overflowX:"auto",paddingBottom:2}}>
+          {wk.map((dk,i)=>{
+            const isSel=dk===selDate, isT=dk===TODAY;
+            return (
+              <button key={dk} onClick={()=>onDate(dk)} style={{flexShrink:0,padding:"6px 12px",borderRadius:10,border:`1.5px solid ${isSel?"#7C3AED":isT?"#4338CA44":"#1F2937"}`,background:isSel?"#7C3AED":"transparent",color:isSel?"#fff":isT?"#818CF8":"#6B7280",cursor:"pointer",fontSize:12,fontWeight:isSel||isT?700:400,position:"relative",transition:"all .15s"}}>
+                {DAYS_SHORT[i]}
+                {isT&&!isSel&&<div style={{width:3,height:3,borderRadius:"50%",background:"#818CF8",position:"absolute",bottom:3,left:"50%",transform:"translateX(-50%)"}}/>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {mode==="month"&&(
+        <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2,marginTop:4}}>
+          {DAYS_SHORT.map(d=><div key={d} style={{textAlign:"center",fontSize:9,color:"#4B5563",padding:"2px 0"}}>{d}</div>)}
+          {Array.from({length:new Date(mo[0]+"T12:00:00").getDay()}).map((_,i)=><div key={"e"+i}/>)}
+          {mo.map(dk=>{
+            const isSel=dk===selDate, isT=dk===TODAY;
+            return (
+              <button key={dk} onClick={()=>onDate(dk)} style={{aspectRatio:"1",borderRadius:6,border:`1px solid ${isSel?"#7C3AED":isT?"#4338CA44":"transparent"}`,background:isSel?"#7C3AED":isT?"#4338CA22":"transparent",color:isSel?"#fff":isT?"#818CF8":"#9CA3AF",cursor:"pointer",fontSize:10,fontWeight:isSel||isT?700:400,display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>
+                {new Date(dk+"T12:00:00").getDate()}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// 🏠 MAIN APP — localStorage version
+// ══════════════════════════════════════════════════════════════
+export default function App() {
+  const [history,setHistory]   = useState(() => LS.get("h",{}));
+  const [rec,setRec]           = useState(() => LS.get("r",{}));
+  const [wardrobe,setWardrobe] = useState(() => LS.get("w",{moshe:{},hana:{},uri:{}}));
+  const [wardrobeCats,setWardrobeCats] = useState(() => LS.get("wc",{moshe:null,hana:null,uri:null}));
+  const [mealTpl,setMealTpl]   = useState(() => LS.get("mt",[]));
+  const [usageData,setUsageData] = useState(() => LS.get("u",{}));
+  const [names,setNames]       = useState(() => LS.get("n",{A:"משה",B:"חנה"}));
+  const [travelMin,setTravelMin] = useState(() => LS.get("tm",15));
+  const [season,setSeason]     = useState(() => LS.get("s","חורף"));
+  const [debtData,setDebtData] = useState(() => LS.get("debt",{debts:[],payments:[]}));
+
+  const [selDate,setSelDate]   = useState(todayKey());
+  const [viewMode,setViewMode] = useState("week");
+  const [openPanel,setOpenPanel] = useState(null);
+  const [dismissedAlerts,setDismissedAlerts] = useState([]);
+  
+  const TODAY = todayKey();
+  
+  // ── Auto-save to localStorage on every change ──
+  useEffect(() => LS.set("h",history),   [history]);
+  useEffect(() => LS.set("r",rec),       [rec]);
+  useEffect(() => LS.set("w",wardrobe),  [wardrobe]);
+  useEffect(() => LS.set("wc",wardrobeCats), [wardrobeCats]);
+  useEffect(() => LS.set("mt",mealTpl),  [mealTpl]);
+  useEffect(() => LS.set("u",usageData), [usageData]);
+  useEffect(() => LS.set("n",names),     [names]);
+  useEffect(() => LS.set("tm",travelMin),[travelMin]);
+  useEffect(() => LS.set("s",season),    [season]);
+  useEffect(() => LS.set("debt",debtData),[debtData]);
+
+  const gd=dk=>history[dk]||{};
+  const ud=(dk,k,v)=>setHistory(h=>({...h,[dk]:{...h[dk],[k]:v}}));
+  const sd=(dk,d)=>setHistory(h=>({...h,[dk]:d}));
+  const udFn=(dk,k,updater)=>setHistory(h=>{const cur=h[dk]||{}; const prev=cur[k]; const next=typeof updater==="function"?updater(prev):updater; return {...h,[dk]:{...cur,[k]:next}};});
+
+  const handleShift=(shiftId,auto)=>{
+    const dk=selDate, dd=gd(dk), prevDay=addDays(dk,-1), prevDd=gd(prevDay);
+    const cleaned=(dd.mosheTasks||[]).filter(t=>!t.auto);
+    sd(dk,{...dd,shift:shiftId,mosheTasks:[...cleaned,...auto.today]});
+    if(auto.prevDay.length){const pc=(prevDd.mosheTasks||[]).filter(t=>!t.auto||!t.text.includes("בגדים"));sd(prevDay,{...prevDd,mosheTasks:[...pc,...auto.prevDay]});}
+    setOpenPanel(null);
+  };
+
+  const handleWorkoutUpdate=(dk,v)=>{
+    ud(dk,"workout",v);
+    if(v.couple&&v.moshe?.active){
+      const prevDay=addDays(dk,-1), prevDd=gd(prevDay), prevTasks=prevDd.mosheTasks||[];
+      if(!prevTasks.find(t=>t.text.includes("לאימון"))){sd(prevDay,{...prevDd,mosheTasks:[...prevTasks,{id:gid(),text:"👟 להכין בגדים לאימון זוגי למחר",done:false,auto:true}]});}
+    }
+  };
+
+  useEffect(()=>{
+    const dd=gd(selDate);
+    const clients=dd.makeup?.clients||[];
+    const lastEnd=clients.reduce((max,c)=>c.endTime&&timeToMins(c.endTime)>max?timeToMins(c.endTime):max,0);
+    const taskExists=(dd.mosheTasks||[]).find(t=>t.auto&&t.text.includes("לצאת מוקדם"));
+    if(lastEnd>timeToMins("15:45")&&!taskExists){
+      const newTask={id:gid(),text:"🏃 לצאת מוקדם מהעבודה ולאסוף את אורי (חנה עסוקה עם לקוחה)",done:false,auto:true,time:""};
+      ud(selDate,"mosheTasks",[...(dd.mosheTasks||[]),newTask]);
+    }
+  },[selDate,history]);
+
+  const dd=gd(selDate);
+  const isThursday=dowOf(selDate)===4;
+  const shift=SHIFTS.find(s=>s.id===(dd.shift||"none"))||SHIFTS[0];
+  const PCOLORS={A:"#7C3AED",B:"#DB2777"};
+
+  const buildAlerts=()=>{
+    if(selDate!==TODAY) return [];
+    const alerts=[];
+    if(!dd.shift) alerts.push({text:"משמרת חנה לא הוגדרה להיום",level:"warn"});
+    if(dd.makeup?.clients?.some(c=>c.type!=="lashes"&&!c.depositPaid)) alerts.push({text:"יש לקוחה ללא מקדמה – בדוק לפני שהיא מגיעה",level:"err"});
+    if(!dd.outfitM?.confirmed&&new Date().getHours()>7) alerts.push({text:"תלבושת לא אושרה – הצע קומבינציה",level:"warn"});
+    if(isThursday&&!dd.zoom?.attended) alerts.push({text:"💻 שיעור Zoom הלילה 19:00–22:00 – אל תשכח לסמן",level:"warn"});
+    return alerts.filter((_,i)=>!dismissedAlerts.includes(i));
+  };
+  const alerts=buildAlerts();
+
+  const getNextAction=()=>{
+    if(selDate!==TODAY) return null;
+    const hr=new Date().getHours();
+    if(hr<9&&!dd.outfitM?.confirmed) return "לאשר תלבושת לפני יציאה 👗";
+    if(hr<9&&dd.shift&&dd.shift!=="none"&&!(dd.mosheTasks||[]).find(t=>t.text.includes("לגן")&&t.done)) return "להביא את אורי לגן 🚌";
+    const unpaid=(dd.makeup?.clients||[]).filter(c=>c.type!=="lashes"&&!c.depositPaid);
+    if(unpaid.length) return `לגבות מקדמה מ-${unpaid[0].firstName||"לקוחה"} 💰`;
+    const undone=[...(rec.recM||[]),...(dd.mosheTasks||[])].find(t=>!t.done&&!t.auto);
+    if(undone) return undone.text;
+    if(hr>20&&!(dd.winnerMoshe?.phoneOff)) return "לנתק טלפון לפני שינה 📵";
+    return null;
+  };
+  const nextAction=getNextAction();
+
+  const wkDates=weekOf(selDate);
+  const cleaningDay=wkDates.find(dk=>gd(dk).cleaning?.scheduled);
+  const hideCleaningToday=cleaningDay&&cleaningDay!==selDate;
+  const shoppingDay=wkDates.find(dk=>gd(dk).shopping?.scheduled);
+  const hideShoppingToday=shoppingDay&&shoppingDay!==selDate;
+
+  const makeupClients=dd.makeup?.clients||[];
+  const makeupTotal=makeupClients.reduce((s,c)=>{if(c.type==="lashes")return s+90;const base=350,extra=Math.max(0,(c.heads||1)-1)*150,travel=c.atHome?0:150;return s+base+extra+travel;},0);
+
+  const totalDebt=(debtData?.debts||[]).filter(x=>x.active!==false).reduce((s,x)=>s+Number(x.amount||0),0);
+  const totalPaid=(debtData?.payments||[]).reduce((s,p)=>s+Number(p.amountA||0)+Number(p.amountB||0),0);
+  const debtRemaining=Math.max(0,totalDebt-totalPaid);
+
+  const CARDS=[
+    {id:"shift", emoji:shift.emoji==="—"?"🏥":shift.emoji, title:"משמרת חנה", color:"#3B82F6", subtitle:shift.id==="none"?"לא הוגדרה":shift.label, urgent:shift.id==="morning_ext"},
+    {id:"makeup", emoji:"💄", title:"איפור / ריסים", color:"#A855F7", subtitle:makeupClients.length===0?"לא מתוכנן":`${makeupClients.length} לקוחות • ${makeupTotal.toLocaleString()}₪`, done:makeupClients.length>0&&makeupClients.every(c=>c.type==="lashes"||c.depositPaid)},
+    {id:"outfit", emoji:"👗", title:"לבוש", color:"#EC4899", subtitle:dd.outfitM?.confirmed&&dd.outfitH?.confirmed?"✅ כולם אושרו":"הצע תלבושות", done:dd.outfitM?.confirmed&&dd.outfitH?.confirmed&&dd.outfitU?.confirmed},
+    {id:"meals", emoji:"🍽️", title:"ארוחות", color:"#10B981", subtitle:[dd.meals?.breakfast?.main,dd.meals?.lunch?.main,dd.meals?.dinner?.main].filter(Boolean).join(" • ")||"לא תוכנן", done:!!(dd.meals?.breakfast?.main&&dd.meals?.dinner?.main)},
+    {id:"workout", emoji:"🏋️", title:"אימונים", color:"#F97316", subtitle:dd.workout?.moshe?.active||dd.workout?.hana?.active?"מתוכנן":"לא תוכנן"},
+    {id:"tasks", emoji:"✅", title:"משימות", color:"#818CF8", subtitle:(()=>{const all=[...(rec.recM||[]),...(dd.mosheTasks||[]),...(rec.recH||[]),...(dd.hanaTasks||[])];const done=all.filter(t=>t.done).length;return `${done}/${all.length}`;})(), done:(()=>{const all=[...(rec.recM||[]),...(dd.mosheTasks||[]),...(rec.recH||[]),...(dd.hanaTasks||[])];return all.length>0&&all.every(t=>t.done);})()},
+    {id:"cleaning", emoji:"🧹", title:"ניקיון", color:"#EAB308", subtitle:dd.cleaning?.scheduled?"מתוכנן היום":cleaningDay?`ביום ${DAYS_HE[dowOf(cleaningDay)]}`:"לא תוכנן", done:dd.cleaning?.scheduled&&(dd.cleaning?.items||[]).every(i=>i.done), hidden:hideCleaningToday&&!dd.cleaning?.scheduled},
+    {id:"shopping", emoji:"🛒", title:"קניות", color:"#06B6D4", subtitle:dd.shopping?.scheduled?"מתוכנן היום":shoppingDay?`ביום ${DAYS_HE[dowOf(shoppingDay)]}`:"לא תוכנן", done:dd.shopping?.scheduled&&[...(rec.shopping||[]),...(dd.shopping?.items||[])].every(i=>i.done), hidden:hideShoppingToday&&!dd.shopping?.scheduled},
+    {id:"debt", emoji:"💰", title:"ניהול חובות", color:"#F59E0B", subtitle:debtRemaining===0?"✅ כל החובות נסגרו!":`נותר ${debtRemaining.toLocaleString()} ₪`, done:debtRemaining===0},
+    ...(isThursday?[{id:"zoom", emoji:"💻", title:"שיעור Zoom", color:"#818CF8", subtitle:dd.zoom?.attended?"✅ השתתפתי":"19:00–22:00", done:dd.zoom?.attended}]:[]),
+    {id:"dateNight", emoji:"☕", title:"דייט זוגי", color:"#FF6B9D", subtitle:dd.dateNight?.scheduled?[dd.dateNight?.day,dd.dateNight?.time,dd.dateNight?.place].filter(Boolean).join(" • "):"לא תוכנן"},
+    {id:"intimacy", emoji:"💕", title:"דייט מיני", color:"#EC4899", subtitle:dd.intimacy?.scheduled?"מתוכנן":"לא תוכנן"},
+    {id:"winner_moshe", emoji:"🏆", title:`קוד המנצח – ${names.A}`, color:"#F59E0B", subtitle:"טקס הלילה שלי"},
+    {id:"winner_hana",  emoji:"🌙", title:`קוד המנצח – ${names.B}`, color:"#C084FC", subtitle:"טקס הלילה שלה"},
+  ];
+
+  const renderPanel=()=>{
+    const close=()=>setOpenPanel(null);
+    if(!openPanel) return null;
+    if(openPanel==="shift")    return <ShiftPanel data={dd} onShiftChange={handleShift} travelMin={travelMin} onUpdateTravel={setTravelMin} kidName="אורי" onClose={close}/>;
+    if(openPanel==="makeup")   return <MakeupPanel data={dd.makeup} onUpdate={v=>ud(selDate,"makeup",v)} shiftId={dd.shift||"none"} kidName="אורי" onClose={close}/>;
+    if(openPanel==="outfit")   return <OutfitPanel wardrobeM={wardrobe.moshe} wardrobeH={wardrobe.hana} wardrobeU={wardrobe.uri} catsM={wardrobeCats.moshe} catsH={wardrobeCats.hana} catsU={wardrobeCats.uri} dataM={dd.outfitM} dataH={dd.outfitH} dataU={dd.outfitU} onM={v=>ud(selDate,"outfitM",v)} onH={v=>ud(selDate,"outfitH",v)} onU={v=>ud(selDate,"outfitU",v)} onWM={v=>setWardrobe(w=>({...w,moshe:v}))} onWH={v=>setWardrobe(w=>({...w,hana:v}))} onWU={v=>setWardrobe(w=>({...w,uri:v}))} onCM={v=>setWardrobeCats(c=>({...c,moshe:v}))} onCH={v=>setWardrobeCats(c=>({...c,hana:v}))} onCU={v=>setWardrobeCats(c=>({...c,uri:v}))} season={season} onClose={close}/>;
+    if(openPanel==="meals")    return <MealsPanel data={dd.meals} templates={mealTpl} onUpdate={v=>ud(selDate,"meals",v)} onUpdateTpl={setMealTpl} onClose={close}/>;
+    if(openPanel==="workout")  return <WorkoutPanel data={dd.workout} onUpdate={v=>handleWorkoutUpdate(selDate,v)} wardrobeM={wardrobe.moshe} wardrobeH={wardrobe.hana} onClose={close}/>;
+    if(openPanel==="tasks")    return <TasksPanel mT={dd.mosheTasks||[]} hT={dd.hanaTasks||[]} recM={rec.recM||[]} recH={rec.recH||[]} onMT={v=>ud(selDate,"mosheTasks",v)} onHT={v=>ud(selDate,"hanaTasks",v)} onRM={v=>setRec(r=>({...r,recM:v}))} onRH={v=>setRec(r=>({...r,recH:v}))} names={names} onClose={close}/>;
+    if(openPanel==="cleaning") return <CleaningPanel data={dd.cleaning} allWeekData={history} selectedDate={selDate} onUpdate={v=>ud(selDate,"cleaning",v)} recurring={rec.cleaning} onUpdateRec={v=>setRec(r=>({...r,cleaning:v}))} onClose={close}/>;
+    if(openPanel==="shopping") return <ShoppingPanel data={dd.shopping} onUpdate={v=>ud(selDate,"shopping",v)} recurring={rec.shopping} onUpdateRec={v=>setRec(r=>({...r,shopping:v}))} usageData={usageData} onUpdateUsage={setUsageData} onClose={close}/>;
+    if(openPanel==="debt")     return <DebtPanel data={debtData} onUpdate={setDebtData} names={names} onClose={close}/>;
+    if(openPanel==="zoom")     return <ZoomPanel data={dd.zoom} onUpdate={v=>ud(selDate,"zoom",v)} onClose={close}/>;
+    if(openPanel==="dateNight") return <DateNightPanel data={dd.dateNight} onUpdate={v=>ud(selDate,"dateNight",v)} onClose={close}/>;
+    if(openPanel==="intimacy") return <IntimacyPanel data={dd.intimacy} onUpdate={v=>ud(selDate,"intimacy",v)} onClose={close}/>;
+    if(openPanel==="winner_moshe") return <WinnerPanel data={dd.winnerMoshe} onUpdate={updater=>udFn(selDate,"winnerMoshe",updater)} who="moshe" name={names.A} onClose={close}/>;
+    if(openPanel==="winner_hana")  return <WinnerPanel data={dd.winnerHana}  onUpdate={updater=>udFn(selDate,"winnerHana",updater)}  who="hana"  name={names.B} onClose={close}/>;
+  };
+
+  const goals=dd.goals||{A:["",""],B:["",""],doneA:[false,false],doneB:[false,false]};
+
+  return (
+    <div style={{minHeight:"100vh",background:"#0a0e1a",color:"#f1f5f9",fontFamily:"'Segoe UI',system-ui,sans-serif",direction:"rtl",paddingBottom:100}}>
+      {renderPanel()}
+      <div style={{background:"linear-gradient(180deg,#111827 0%,#0a0e1a 100%)",borderBottom:"1px solid #1F2937",padding:"12px 16px",position:"sticky",top:0,zIndex:50}}>
+        <div style={{maxWidth:480,margin:"0 auto"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+            <div>
+              <div style={{fontSize:14,fontWeight:800,color:"#f1f5f9"}}>🏠 Family Life OS <span style={{fontSize:10,color:"#4B5563",fontWeight:400}}>v7</span></div>
+              <div style={{fontSize:11,color:"#6B7280"}}>{names.A} & {names.B}</div>
+            </div>
+            <select value={season} onChange={e=>setSeason(e.target.value)} style={{background:"#1F2937",border:"1px solid #2d3748",borderRadius:10,padding:"4px 10px",color:"#9CA3AF",fontSize:12,cursor:"pointer",outline:"none"}}>
+              {SEASONS.map(s=><option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <ViewBar mode={viewMode} onMode={setViewMode} selDate={selDate} onDate={setSelDate}/>
+        </div>
+      </div>
+
+      <div style={{maxWidth:480,margin:"0 auto",padding:"14px 14px"}}>
+        <div style={{marginBottom:10}}>
+          <div style={{fontSize:18,fontWeight:800}}>
+            {DAYS_HE[dowOf(selDate)]} {fmtDate(selDate)}
+            {selDate===TODAY&&<span style={{fontSize:11,background:"#4338CA",color:"#C7D2FE",borderRadius:8,padding:"2px 8px",marginRight:8,fontWeight:400}}>היום</span>}
+          </div>
+        </div>
+
+        <SmartAlerts alerts={alerts} onDismiss={i=>setDismissedAlerts(d=>[...d,i])}/>
+
+        {nextAction&&selDate===TODAY&&(
+          <div style={{background:"linear-gradient(135deg,#7C3AED22,#DB277722)",border:"1px solid #7C3AED55",borderRadius:14,padding:"12px 16px",marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
+            <div style={{fontSize:20}}>👉</div>
+            <div>
+              <div style={{fontSize:10,color:"#818CF8",fontWeight:700,marginBottom:2}}>הפעולה הבאה שלך</div>
+              <div style={{fontSize:14,color:"#e2e8f0",fontWeight:600}}>{nextAction}</div>
+            </div>
+          </div>
+        )}
+
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:14}}>
+          {["A","B"].map(k=>{
+            const gl=k==="A"?goals.A:goals.B; const dl=k==="A"?goals.doneA:goals.doneB; const color=PCOLORS[k];
+            return (
+              <div key={k} style={{background:"#111827",borderRadius:14,padding:"12px 14px",border:`1.5px solid ${color}22`}}>
+                <div style={{fontSize:11,color,fontWeight:700,marginBottom:8}}>🎯 {names[k]}</div>
+                {[0,1].map(i=>(
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:6,marginBottom:5}}>
+                    <button onClick={()=>{const a=[...dl];a[i]=!a[i];ud(selDate,"goals",{...goals,[k==="A"?"doneA":"doneB"]:a});}} style={{width:18,height:18,borderRadius:"50%",border:`2px solid ${dl[i]?color:"#374151"}`,background:dl[i]?color:"transparent",cursor:"pointer",flexShrink:0,color:"#fff",fontSize:10}}>{dl[i]?"✓":""}</button>
+                    <input value={gl[i]} onChange={e=>{const a=[...gl];a[i]=e.target.value;ud(selDate,"goals",{...goals,[k]:a});}} placeholder={`יעד ${i+1}`}
+                      style={{flex:1,background:"transparent",border:"none",borderBottom:`1px solid ${dl[i]?color:"#1F2937"}`,color:dl[i]?"#4B5563":"#f1f5f9",fontSize:11,padding:"2px 0",textDecoration:dl[i]?"line-through":"none",outline:"none"}}/>
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+
+        {CARDS.map(card=><BigCard key={card.id} {...card} onClick={()=>setOpenPanel(card.id)}/>)}
+      </div>
+
+      <div style={{position:"fixed",bottom:0,left:0,right:0,background:"#111827",borderTop:"1px solid #1F2937",padding:"10px 16px",backdropFilter:"blur(10px)"}}>
+        <div style={{maxWidth:480,margin:"0 auto",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div style={{display:"flex",gap:12}}>
+            {["A","B"].map(k=>{
+              const gl=gd(TODAY).goals||{doneA:[false,false],doneB:[false,false]};
+              const done=(k==="A"?gl.doneA:gl.doneB)||[false,false];
+              const shift2=gd(TODAY).shift;
+              return (
+                <div key={k}>
+                  <div style={{fontSize:10,color:PCOLORS[k],fontWeight:700}}>{names[k]}</div>
+                  <div style={{fontSize:10,color:done.filter(Boolean).length===2?"#10B981":"#6B7280"}}>{done.filter(Boolean).length}/2 🎯</div>
+                  {k==="B"&&shift2&&shift2!=="none"&&<div style={{fontSize:9,color:shift2==="morning_ext"?"#EF4444":"#F59E0B"}}>{shift2==="morning_ext"?"ססיה":"בוקר"}</div>}
+                </div>
+              );
+            })}
+            {debtRemaining>0&&<div style={{borderRight:"1px solid #1F2937",paddingRight:12,marginRight:4}}/>}
+            {debtRemaining>0&&<div><div style={{fontSize:10,color:"#F59E0B",fontWeight:700}}>💰 חובות</div><div style={{fontSize:10,color:"#6B7280"}}>{debtRemaining.toLocaleString()}₪</div></div>}
+          </div>
+          <button onClick={()=>setSelDate(TODAY)} style={{background:"linear-gradient(135deg,#7C3AED,#DB2777)",border:"none",borderRadius:12,padding:"10px 24px",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:800,boxShadow:"0 4px 15px rgba(124,58,237,.4)"}}>
+            היום
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
